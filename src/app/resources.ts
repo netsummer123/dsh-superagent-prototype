@@ -6,6 +6,9 @@ import { readGithub } from '../sources/github-read.ts'
 import { feishuReferences, feishuRead } from '../sources/feishu-read.ts'
 import { feishuRef } from '../sources/feishu.ts'
 import { feishuTriggerId } from '../sources/feishu-trigger.ts'
+import { dingtalkRef } from '../sources/dingtalk-trigger.ts'
+import { dingtalkTriggerId } from '../sources/dingtalk-trigger.ts'
+import { dingtalkRead } from '../sources/dingtalk-read.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
@@ -51,6 +54,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'models', holds: 'model providers, the DSH default and each role\'s model' },
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
+  { name: 'dingtalk/<trigger-id>/…', holds: 'a DingTalk original: its thread window, or the message it threads under or answers', executor: true },
   { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
 ]
 export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(resource => !executor || resource.executor)
@@ -109,6 +113,26 @@ async function sourcePage(read: Read, source: string, fetch: () => Promise<unkno
   return text(read, body)
 }
 const THREAD_DECISIONS = 5
+/**
+ * Per-Source context references for a Trigger: the `context` block an assessment reads, and the ID of the Trigger whose
+ * message this one answers. A kind not handled here supplies neither, and the trigger read omits `replied_to`.
+ */
+function sourceContextRefs(trigger: Trigger): { refs?: Record<string, string>; repliedTo?: string } {
+  if (trigger.source === 'feishu') {
+    const ref = feishuRef(trigger)
+    if (!ref) return {}
+    const parent = typeof trigger.meta.parentId === 'string' ? feishuTriggerId(trigger.meta.parentId) : undefined
+    return { refs: feishuReferences(ref), ...parent ? { repliedTo: parent } : {} }
+  }
+  if (trigger.source === 'dingtalk') {
+    const ref = dingtalkRef(trigger)
+    if (!ref) return {}
+    const parent = typeof trigger.meta.parentId === 'string' ? dingtalkTriggerId(trigger.meta.parentId) : undefined
+    const read = (section: string) => `dingtalk/${ref.triggerId}/${section}`
+    return { refs: { thread: read('thread'), root: read('root'), parent: read('parent') }, ...parent ? { repliedTo: parent } : {} }
+  }
+  return {}
+}
 const triggerLine = (trigger: Trigger) => ({ trigger_id: trigger.id, actor: trigger.actor.id, human: trigger.human, at: trigger.at,
   preview: preview(trigger.text), chars: trigger.text.length, read: `trigger/${trigger.id}` })
 async function transcript(host: ResourceHost, ticketId: string) {
@@ -211,7 +235,8 @@ const ROUTES: readonly Route[] = [
     const { host, rest, ticketId, offset, signal } = read
     if (!rest || rest.includes('/')) throw new Error('Unknown context resource')
     const found = trigger(host, rest, ticketId)
-    const ref = feishuRef(found)
+    // Context references and the replied-to message are per Source; an added kind supplies both or neither.
+    const context = sourceContextRefs(found)
     // Redact decision IDs, other tickets, and unreachable neighbour triggers when a worker session reads a trigger.
     const ticket = ticketId ? host.store.tickets.get(ticketId) : undefined
     const shown = (item: Trigger | undefined) => item && (!ticket || readable(host, ticket, item)) ? item : undefined
@@ -220,17 +245,24 @@ const ROUTES: readonly Route[] = [
       : disposition
     // Omit card preview and self-reference because this resource returns the full text.
     const { preview: _preview, chars: _chars, read: _read, ...card } = triggerCard(found, visible)
-    const parent = found.source === 'feishu' && typeof found.meta.parentId === 'string' ? found.meta.parentId : undefined
-    const repliedTo = shown(parent ? host.store.triggers.get(feishuTriggerId(parent)) : undefined)
+    const repliedTo = shown(context.repliedTo ? host.store.triggers.get(context.repliedTo) : undefined)
     const neighbours = host.store.read.neighbours(threadKey(found.threads[0]!), found.at, found.id)
     const around = { before: shown(neighbours.before), after: shown(neighbours.after) }
     return { ...card, ...await host.sourceLink(found, signal), acknowledgement: host.store.replyStatus(key('ack', found.id)) ?? 'not_requested',
-      ...(ref ? { context: feishuReferences(ref) } : {}),
+      ...(context.refs ? { context: context.refs } : {}),
       ...(offset === 0 ? {
         ...repliedTo ? { replied_to: triggerLine(repliedTo) } : {},
         around: { ...around.before ? { before: triggerLine(around.before) } : {}, ...around.after ? { after: triggerLine(around.after) } : {} },
       } : {}),
       ...text(read, found.text) }
+  }],
+  ['dingtalk/', async read => {
+    const source = trigger(read.host, read.rest.split('/')[0]!, read.ticketId)
+    const ref = dingtalkRef(source)
+    if (!ref) throw new Error('A DingTalk source trigger is required')
+    const section = read.rest.split('/')[1] ?? 'thread'
+    const part = section === 'message' || section === 'root' || section === 'parent' || section === 'thread' ? section : 'thread'
+    return sourcePage(read, 'dingtalk', () => dingtalkRead(read.host.commands.withSignal(read.signal), source, part === 'message' ? 'root' : part, read.host.feishuPageSize()))
   }],
   ['ticket/', async read => {
     const { host, resource, rest, ticketId, signal } = read

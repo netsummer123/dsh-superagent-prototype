@@ -20,11 +20,28 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 
 ## Prerequisites
 
-- Node.js 22.19+ or 24+, pnpm, git 2.32+, Python 3.8+ and tmux
+- Node.js 22.19+ or 24+, pnpm, git 2.32+
+- Linux or macOS, or Windows 10/11. On Windows the state directory is an ordinary Windows absolute path such as `C:\Users\me\.dsh\state\superagent`, worker shims are `.cmd` batch files, and the CLI fields resolve `gh`/`lark-cli` through `PATHEXT`, so `gh.exe` is found when the field says `gh`. See [Running on Windows](#running-on-windows).
+- Python 3.8+ and tmux are needed only for the Unix service manager (`scripts/dsh-superagent`); dsh-superagent itself runs without them.
 - GitHub CLI (`gh`) 2.48 or later. Source CLI fields must point to `gh` or `lark-cli` wrappers; the host relies on their subcommands and output formats.
 - A repository on github.com; GitHub Enterprise Server is not supported. To create a checkout per Ticket, keep a local clone from which the prepare command can add worktrees. Install `git-lfs` if that repository uses Git LFS.
 - A model provider configured for DeepSeek Harness. dsh-superagent uses the profile's default model unless the Eval or Execution settings name another.
 - For Feishu: `lark-cli` (tested with 1.0.90) and a Feishu or Lark app with a bot
+
+### Running on Windows
+
+The plugin runs natively on Windows 10/11 under DeepSeek Harness; the differences from Linux and macOS are these:
+
+| Area | On Windows |
+| --- | --- |
+| State directory | Any Windows absolute path: `C:\…`, `C:/…`, or a UNC `\\server\share`. A POSIX path that is not absolute on Windows is refused at startup with a message naming the expected form, so a dotted-in Linux config does not silently create an odd directory. |
+| Execution settings → ticket directory | The same absolute Windows path rule; empty still means `<stateDir>\work`. |
+| Worker command shims | `<stateDir>\worker-bin\<command>.cmd` batch files instead of `sh` scripts, so naming `gh` resolves through `PATHEXT`. They run the CLI path resolved at setup, so a worker never reaches the shim again. |
+| CLI fields | Give the wrapper's absolute path (`C:\tools\gh-agent.exe`) or a bare name that `PATHEXT` can resolve. Avoid a `.cmd` wrapper for `gh` itself: the host runs it with `execFile`, which executes a `.cmd` only through a shell. |
+| Git credential helper | Written into `worker-gitconfig` as a `!`-helper, which Git for Windows runs through its own POSIX shell; the recorded path uses forward slashes for that shell. |
+| Service manager | `scripts/dsh-superagent` needs `tmux`, `ps` and `fcntl`, so it is Unix-only. On Windows start the profile with DeepSeek Harness itself (`dsh web`, or the DeepSeek Harness desktop app) and let DSH restart it. |
+
+Everything else — Sources, Policy, the panel, Tickets and Executor Sessions — behaves the same.
 
 ## Accounts
 
@@ -92,7 +109,7 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 
 | Key | Required | Meaning |
 | --- | --- | --- |
-| `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
+| `stateDir` | yes | Absolute path for this platform (`/srv/…`, or `C:\…` on Windows): the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
 After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
@@ -221,7 +238,7 @@ Setup verifies the GitHub repository and the agent's push access, writes the wor
 
 The process environment that setup writes:
 
-- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. A shim removes its own directory from `PATH` before it runs its target.
+- **Command shims** in `<stateDir>/worker-bin`, first on `PATH`: `gh` runs the agent's CLI; `lark-cli` runs the bot's CLI; blocked commands fail. On POSIX a shim is a `sh` script that first removes its own directory from `PATH`; on Windows it is a `<command>.cmd` batch file, which `PATHEXT` resolves.
 - **git configuration** in `<stateDir>/worker-gitconfig`: replaces the operator's global and system git configuration. It selects the agent CLI as the github.com credential helper, rewrites GitHub SSH addresses to HTTPS and defines Git LFS filters. Personal git settings such as an HTTP proxy do not apply. No commit identity is set here, git never prompts for credentials, and `GH_TOKEN` and `GITHUB_TOKEN` are removed.
 
 A file in `worker-bin` or `worker-gitconfig` that dsh-superagent did not write stops setup. A Ticket directory inside a git repository whose own configuration adds credentials fails the Ticket.

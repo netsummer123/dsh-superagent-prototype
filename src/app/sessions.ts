@@ -60,6 +60,11 @@ declare module '@deepseek-ai/cordis' {
  */
 const WORK_TOOLS = ['read', 'write', 'edit', 'read_image', 'glob', 'grep', 'bash', 'pwsh', 'job_output', 'job_list', 'job_kill', 'web_search',
   'web_fetch', 'skill', 'todo_write', 'subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent']
+/**
+ * The tools the main Session reads and runs through: skills, the shell with its jobs, and reading what came in. Both shell
+ * names are listed and the host's own is kept, because DSH refuses a restriction naming a tool it does not register.
+ */
+const MAIN_TOOLS = ['skill', 'bash', 'pwsh', 'read', 'read_image', 'job_output', 'job_list', 'job_kill']
 /** What the main Session is told when it would wait: what it waits for comes to it, and a waiting step holds back the next. */
 const NO_WAIT = 'Reports, follow_up notices, new candidates and a background job\'s end with its output arrive by themselves as messages; '
   + 'end the turn instead of waiting for them.'
@@ -69,14 +74,15 @@ const DEFAULT_WAIT = 'This shell waits up to 60 seconds by default: pass timeout
 /** `sleep` at a command position: the start, after ; & | ( { ! ` or a newline, or after a keyword or a command that runs it. */
 const SLEEP = /(?:^|[;&|({!`\n]|\b(?:do|then|else|elif|if|while|until|time|exec|nohup|command|env)\s)\s*(?:\S*\/)?sleep\b/
 /**
- * The main Session's guard: it refuses a bash command that runs sleep or asks to hold the step longer than 30 seconds, and a
+ * The main Session's guard: it refuses a shell command that runs sleep or asks to hold the step longer than 30 seconds, and a
  * job wait longer than 5 seconds. Under `standard`, as a main Session created before the router preset runs, the shell holds
  * a command 60 seconds and a job wait lasts 30 seconds by default, so a command needs a timeout or the background, and a
  * job wait its timeout; the router preset ends both after 5 seconds.
  */
 function noWait({ name, arguments: input }: { name: string; arguments: unknown }, routed: () => boolean): string | undefined {
   const args = (input ?? {}) as { command?: unknown; timeoutMs?: unknown; run_in_background?: unknown; wait?: unknown; timeout_ms?: unknown }
-  if (name === 'bash') {
+  // The shell tool is `bash` on POSIX and `pwsh` on Windows; both take the same arguments.
+  if (name === 'bash' || name === 'pwsh') {
     const sleeps = typeof args.command === 'string' && SLEEP.test(args.command)
     if (sleeps || typeof args.timeoutMs === 'number' && args.timeoutMs > 30_000) return NO_WAIT
     if (args.timeoutMs === undefined && args.run_in_background !== true && !routed()) return DEFAULT_WAIT
@@ -260,7 +266,11 @@ export class Sessions {
     const register = this.registerTool(agent, binding)
     for (const tool of host.tools(agent, ticket)) register(tool.name, tool.description, tool.schema, tool.execute)
     if (master) {
-      binding.disposers.push(agent.ctx.tools.restrict({ allow: ['skill', 'bash', 'read', 'read_image', 'job_output', 'job_list', 'job_kill'] }),
+      // DSH refuses a restriction that names a tool the host does not have, and the shell tool is `pwsh` on Windows and `bash`
+      // elsewhere, so the allow list keeps only what this host actually registers.
+      const parent = scopeParentOf(agent)
+      const allow = MAIN_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
+      binding.disposers.push(agent.ctx.tools.restrict({ allow }),
         agent.ctx.tools.guard(execution => noWait(execution, () => this.routed(agent))))
     } else {
       // An Executor Session keeps the profile's work tools it has, which DSH requires to be known; its own tools are not masked.

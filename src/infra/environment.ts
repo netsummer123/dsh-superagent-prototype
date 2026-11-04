@@ -4,12 +4,14 @@
  * Provides default-path guardrails rather than an OS-level security boundary, as workers run under the operator's OS user.
  */
 import { lstat, mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises'
-import { realpathSync } from 'node:fs'
-import { delimiter, join, resolve } from 'node:path'
+import { delimiter, join } from 'node:path'
 import type { SubprocessOutputReader, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import type { Deployment } from '../deployment.ts'
 import { SetupError } from '../setup.ts'
 import { CliError } from './commands.ts'
+import { isWindows, shimName } from './platform.ts'
+
+export { sameDirectory, withoutDirectory } from './platform.ts'
 
 const MARKER = '# Written by dsh-superagent on every start; edits are lost.'
 /** Markers of files written under the project's earlier names (`dsh-tag`, `dsh-go`, `dsh-freelancer`), which `dsh-superagent` owns and replaces too. */
@@ -20,15 +22,11 @@ export const workerBin = (stateDir: string): string => join(stateDir, 'worker-bi
 export const workerGitConfig = (stateDir: string): string => join(stateDir, 'worker-gitconfig')
 const shellQuote = (value: string): string => `'${value.replaceAll("'", "'\\''")}'`
 const gitQuote = (value: string): string => `"${value.replace(/[\\"]/g, char => `\\${char}`)}"`
-export const credentialHelper = (cli: string): string => `!${shellQuote(cli)} auth git-credential`
-
-export function sameDirectory(a: string, b: string): boolean {
-  const real = (path: string): string => { try { return realpathSync(path) } catch { return resolve(path) } }
-  return real(a) === real(b)
-}
-export function withoutDirectory(path: string, dir: string): string {
-  return path.split(delimiter).filter(entry => !sameDirectory(entry, dir)).join(delimiter)
-}
+/**
+ * The `!`-helper git runs for github.com. Git executes it through its own shell, which is POSIX on every platform, so the
+ * path is quoted the POSIX way; on Windows the backslashes become forward slashes, which that shell passes through unchanged.
+ */
+export const credentialHelper = (cli: string): string => `!${shellQuote(isWindows ? cli.replaceAll('\\', '/') : cli)} auth git-credential`
 
 /**
  * The variables that tell git which repository, work tree and index to act on. A host started inside git, such as by
@@ -57,10 +55,14 @@ export function agentVariables(stateDir: string): Record<string, string | undefi
   }
 }
 
-/** True when a regular file starts with the dsh-superagent marker in its first two lines; a symbolic link, directory, or other non-regular file never counts as written by dsh-superagent. */
+/**
+ * True when a regular file carries the dsh-superagent marker in its first two lines, in either dialect: a POSIX shim starts
+ * `#!/bin/sh` then the marker, and a Windows shim starts `@echo off` then `rem` and the marker. A symbolic link, a directory,
+ * or any other non-regular file never counts as written by dsh-superagent.
+ */
 async function written(file: string): Promise<boolean> {
   if (!(await lstat(file)).isFile()) return false
-  const head = (await readFile(file, 'utf8')).split('\n', 2)
+  const head = (await readFile(file, 'utf8')).split('\n', 2).join('\n')
   return [MARKER, ...LEGACY_MARKERS].some(marker => head.includes(marker))
 }
 async function own(file: string, text: string, mode = 0o644): Promise<void> {
@@ -73,8 +75,10 @@ async function own(file: string, text: string, mode = 0o644): Promise<void> {
 }
 
 /**
- * Atomically writes worker CLI shims and the isolated git configuration file into the state directory, refusing to overwrite foreign files.
- * Each shim strips the shim directory from PATH before exec so wrapper scripts resolving `gh` or `lark-cli` by name reach the real binary.
+ * Atomically writes worker CLI shims and the isolated git configuration file into the state directory, refusing to overwrite
+ * foreign files. A shim runs the real CLI resolved at setup, so a worker calling the command by name never reaches the shim
+ * again. On POSIX it is a `sh` script that first strips the shim directory from `PATH`; on Windows it is a `.cmd` batch file,
+ * which `PATHEXT` resolves when a worker names `gh` or a blocked command.
  */
 export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' | 'repository' | 'github' | 'feishu'>, blockedCommands: readonly string[]): Promise<void> {
   const { stateDir, repository, github, feishu } = deployment
@@ -85,18 +89,23 @@ export async function writeEnvironment(deployment: Pick<Deployment, 'stateDir' |
   // Workers may be running concurrently: write each shim to a temp file and atomically rename it so no command ever resolves past the shim directory.
   const kept = new Set<string>()
   const shim = async (name: string, body: string): Promise<void> => {
-    const temporary = join(dir, `.${name}.${process.pid}.tmp`)
-    await writeFile(temporary, `#!/bin/sh\n${MARKER}\n${body}\n`, { mode: 0o755 })
-    await rename(temporary, join(dir, name))
-    kept.add(name)
+    const file = shimName(name)
+    const temporary = join(dir, `.${file}.${process.pid}.tmp`)
+    const text = isWindows ? `@echo off\r\nrem ${MARKER}\r\n${body}\r\n` : `#!/bin/sh\n${MARKER}\n${body}\n`
+    await writeFile(temporary, text, isWindows ? {} : { mode: 0o755 })
+    await rename(temporary, join(dir, file))
+    kept.add(file)
   }
   const withoutShims = [
     `self=${shellQuote(dir)}`, 'rest=', 'IFS=:', 'set -f',
     'for entry in $PATH; do [ "$entry" = "$self" ] || rest="${rest:+$rest:}$entry"; done',
     'set +f', 'unset IFS', 'PATH=$rest', 'export PATH',
   ].join('\n')
-  const run = (program: string): string => `${withoutShims}\nexec ${shellQuote(program)} "$@"`
-  const fail = (message: string): string => `echo ${shellQuote(message)} >&2\nexit 1`
+  const batchQuote = (value: string): string => `"${value.replaceAll('%', '%%').replaceAll('"', '""')}"`
+  const run = (program: string): string => isWindows ? `${batchQuote(program)} %*` : `${withoutShims}\nexec ${shellQuote(program)} "$@"`
+  const fail = (message: string): string => isWindows
+    ? `>&2 echo ${message.replaceAll('%', '%%').replaceAll('&', '^&').replaceAll('|', '^|')}\r\nexit /b 1`
+    : `echo ${shellQuote(message)} >&2\nexit 1`
   await shim('gh', run(github.cli))
   await shim('lark-cli', feishu ? run(feishu.cli) : fail('lark-cli is unavailable: this installation has no Feishu bot.'))
   for (const name of new Set(blockedCommands.filter(name => !WORKER_COMMANDS.includes(name)))) {

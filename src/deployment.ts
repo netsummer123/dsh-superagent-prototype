@@ -7,10 +7,12 @@ import s from '@deepseek-ai/schemastery'
 import { z } from 'zod'
 import type { SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
 import { runAsWorker, sameDirectory, withoutDirectory, workerBin } from './infra/environment.ts'
+import { ABSOLUTE_PATH, assertNativeAbsolute, executableNames, isCommandName, isWindows, stringEnvironment } from './infra/platform.ts'
 import { SetupError } from './setup.ts'
 
 const reason = (error: unknown): string => error instanceof Error ? error.message : String(error)
-const absolute = (description: string) => s.string().pattern(/^\//).description(`${description} Absolute path.`)
+/** An absolute path on either platform; its native form is checked where the path is used, so one saved config reads the same everywhere. */
+const absolute = (description: string) => s.string().pattern(ABSOLUTE_PATH).description(`${description} Absolute path.`)
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
@@ -39,6 +41,8 @@ export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
   const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
+  // The schema accepts either platform's shape so a saved config travels; here the path is actually used, so it must be native.
+  assertNativeAbsolute('stateDir', stateDir)
   return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
 
@@ -47,32 +51,51 @@ export const GithubAccountsSchema = z.object({
   cli: z.string().trim().default(''),
 })
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
+/** DingTalk bot credentials: an enterprise internal app's AppKey and AppSecret, exchanged for an access token at setup and on demand. */
+export const DingtalkBotSchema = z.object({ appKey: z.string().trim().default(''), appSecret: z.string().trim().default('') })
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
-export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape) }
+export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape),
+  dingtalk: Object.keys(DingtalkBotSchema.shape) }
 
 export interface Deployment extends Machine {
   repository: string
   github: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
+  dingtalk?: DingtalkBot
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
+export interface DingtalkBot { appKey: string; appSecret: string; robotCode: string; name: string }
 
-/** Resolve a command name or absolute path to an executable file, ignoring the worker shim directory. */
+/**
+ * Resolve a command name or absolute path to an executable file, ignoring the worker shim directory.
+ * On Windows a bare name is tried with each `PATHEXT` extension, because the CLI there is `gh.exe` rather than `gh`.
+ */
 export function executable(name: string, path: string, exclude?: string): string {
-  if (name.includes('/') && !isAbsolute(name)) throw new Error(`${name} must be a command name or an absolute path`)
-  const candidates = isAbsolute(name) ? [name] : path.split(delimiter).filter(dir => isAbsolute(dir) && !(exclude && sameDirectory(dir, exclude))).map(dir => join(dir, name))
-  for (const candidate of candidates) {
-    try { if (statSync(candidate).isFile()) { accessSync(candidate, constants.X_OK); return candidate } }
-    catch { /* Not an executable file here; try the next PATH directory. */ }
+  if (!isAbsolute(name) && !isCommandName(name)) throw new Error(`${name} must be a command name or an absolute path`)
+  const names = isAbsolute(name) ? [name] : executableNames(name)
+  const dirs = isAbsolute(name) ? [''] : path.split(delimiter).filter(dir => isAbsolute(dir) && !(exclude && sameDirectory(dir, exclude)))
+  for (const dir of dirs) {
+    for (const candidate of names.map(item => dir ? join(dir, item) : item)) {
+      try {
+        if (!statSync(candidate).isFile()) continue
+        // Windows has no execute bit; a readable file with a known extension is what the platform runs.
+        if (!isWindows) accessSync(candidate, constants.X_OK)
+        return candidate
+      } catch { /* Not an executable file here; try the next extension or PATH directory. */ }
+    }
   }
   throw new Error(`${name} is not an executable file${isAbsolute(name) ? '' : ' on PATH'}`)
 }
 
 export type Probe = (argv: string[]) => Promise<string>
-/** Run startup checks through DSH's worker subprocess service with worker shims removed from PATH so a `gh` wrapper script reaches the real binary. */
+/** Run startup checks through DSH's worker subprocess service with worker shims removed from PATH so a `gh` wrapper reaches the real binary. */
 export function workerProbe(subprocess: SubprocessRuntime, stateDir: string, cwd: string, signal: AbortSignal): Probe {
   const path = withoutDirectory(process.env.PATH ?? '', workerBin(stateDir))
-  return argv => runAsWorker(subprocess, ['env', `PATH=${path}`, ...argv], cwd, AbortSignal.any([signal, AbortSignal.timeout(60_000)]))
+  const lifetime = AbortSignal.any([signal, AbortSignal.timeout(60_000)])
+  // POSIX prefixes `PATH` with the `env` tool; Windows has no `env`, so the runtime receives the environment itself.
+  return isWindows
+    ? argv => runAsWorker(subprocess, argv, cwd, lifetime, { ...stringEnvironment(), PATH: path })
+    : argv => runAsWorker(subprocess, ['env', `PATH=${path}`, ...argv], cwd, lifetime)
 }
 
 const GithubUser = z.object({ login: z.string().regex(/^[A-Za-z0-9-]+$/), id: z.number().int().positive() })
@@ -129,3 +152,41 @@ export async function resolveFeishuBot(machine: Machine, feishu: unknown, probe:
   if (!info) return fail(new SetupError('feishuNoBot'))
   return { cli, appId: status.appId, brand: status.brand, botId: info.bot.open_id, name: info.bot.app_name }
 }
+
+/** A minimal HTTP client that setup and the DingTalk transport share; returns the parsed JSON body of a request. */
+export type Fetcher = (input: { url: string; method: 'GET' | 'POST'; headers?: Record<string, string>; body?: string }) => Promise<{ status: number; text: string }>
+/** The default fetcher, backed by the global `fetch` that Node 22 provides. */
+export const defaultFetcher: Fetcher = async request => {
+  const response = await fetch(request.url, { method: request.method, headers: request.headers, ...request.body ? { body: request.body } : {} })
+  return { status: response.status, text: await response.text() }
+}
+const DingtalkToken = z.object({ accessToken: z.string().min(1) })
+const DingtalkRobot = z.object({ name: z.string().default(''), robotCode: z.string().default('') })
+const DINGTALK_API = 'https://oapi.dingtalk.com'
+/**
+ * Verify the DingTalk app's AppKey and AppSecret by exchanging them for an access token, then read the robot's name and code.
+ * The returned credentials are what the Source uses to receive Stream events and to send replies; a failure disables only DingTalk.
+ */
+export async function resolveDingtalkBot(machine: Machine, dingtalk: unknown, fetcher: Fetcher = defaultFetcher): Promise<DingtalkBot | undefined> {
+  const { appKey, appSecret } = DingtalkBotSchema.parse(dingtalk ?? {})
+  if (!appKey && !appSecret) return undefined
+  if (!appKey) throw new SetupError('dingtalkAppKeyUnset')
+  if (!appSecret) throw new SetupError('dingtalkAppSecretUnset')
+  const fail = (error: unknown): never => { throw error instanceof SetupError ? error : new SetupError('dingtalkCliFailed', { output: reason(error) }) }
+  // Newer endpoint: POST https://api.dingtalk.com/v1.0/oauth2/accessToken with { appKey, appSecret }.
+  const token = await fetcher({ url: 'https://api.dingtalk.com/v1.0/oauth2/accessToken', method: 'POST',
+    headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appKey, appSecret }) }).catch(fail)
+  const parsedToken = parsed(DingtalkToken, token.text)
+  if (!parsedToken) return fail(new SetupError('dingtalkCliFailed', { output: `accessToken: ${status(token.status)}` }))
+  // A working token proves the credentials; the robot name/code is a best-effort display fact, so its failure must not block setup
+  // (the legacy robot-info endpoint is not served for every app). Enterprise internal apps use the AppKey as the robot code.
+  let name = appKey, robotCode = appKey
+  try {
+    const info = await fetcher({ url: `${DINGTALK_API}/topapi/robot/info?access_token=${encodeURIComponent(parsedToken.accessToken)}`, method: 'GET' })
+    const value = JSON.parse(info.text) as { errcode?: number; result?: unknown }
+    const robot = (value.errcode ?? 0) === 0 ? DingtalkRobot.safeParse(value.result ?? {}) : undefined
+    if (robot?.success) { if (robot.data.name) name = robot.data.name; if (robot.data.robotCode) robotCode = robot.data.robotCode }
+  } catch { /* Keep the AppKey fallbacks; the token already validated the app. */ }
+  return { appKey, appSecret, robotCode, name }
+}
+const status = (code: number): string => `HTTP ${code}`

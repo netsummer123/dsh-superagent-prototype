@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
-import type { Deployment } from '../deployment.ts'
+import { defaultFetcher, type Deployment, type Fetcher } from '../deployment.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -57,6 +57,8 @@ function membership(error: unknown): unknown {
  * Restricts GitHub API calls to the configured repository and translates CLI failures into CliError instances for Sources, MasterAssessor, Outbox, and Settings.
  */
 export class Commands {
+  /** HTTP client for DingTalk; the default is the global `fetch`, and tests replace it to answer DingTalk calls. */
+  fetcher: Fetcher = defaultFetcher
   /**
    * @param resolved - returns the resolved deployment setup, or throws while setup is still pending.
    * @param environment - variables overriding `process.env` for every command (such as isolated git settings).
@@ -64,7 +66,12 @@ export class Commands {
   constructor(private readonly resolved: () => Deployment, private readonly environment: Record<string, string | undefined>, private readonly signal: AbortSignal) {}
   get deployment(): Deployment { return this.resolved() }
   get repository(): string { return this.deployment.repository }
-  withSignal(signal?: AbortSignal): Commands { return signal ? new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal])) : this }
+  withSignal(signal?: AbortSignal): Commands {
+    if (!signal) return this
+    const next = new Commands(this.resolved, this.environment, AbortSignal.any([this.signal, signal]))
+    next.fetcher = this.fetcher
+    return next
+  }
   async run(program: string, args: string[], cwd?: string): Promise<string> {
     try {
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
@@ -112,4 +119,65 @@ export class Commands {
   }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
+  /**
+   * Calls the DingTalk open API as the configured enterprise app, returning its JSON body.
+   * A token is fetched once and cached in memory per AppKey; an expired-token answer drops the cache and retries the call
+   * once. A body that reports `errcode != 0` throws a `CliError` carrying that code, which channels read to tell a gone
+   * conversation from a retryable failure.
+   * @param path - a path such as `/v1.0/robot/oToMessages/batchSend`, appended to the API base.
+   */
+  async dingtalk(path: string, body?: unknown, method: 'GET' | 'POST' = body === undefined ? 'GET' : 'POST'): Promise<unknown> {
+    const url = `https://api.dingtalk.com${path}`
+    const send = async (token: string) => {
+      const headers: Record<string, string> = { 'x-acs-dingtalk-access-token': token }
+      if (body !== undefined) headers['content-type'] = 'application/json'
+      return this.fetcher({ url, method, headers, ...body !== undefined ? { body: JSON.stringify(body) } : {} })
+    }
+    try { return this.dingtalkBody(await send(await this.dingtalkToken()), path) }
+    catch (error) {
+      if (!staleToken(error)) throw error
+      // The cached token expired or was revoked; drop it, fetch a fresh one, and try the same call once more.
+      tokenCache.delete(this.deployment.dingtalk?.appKey ?? '')
+      return this.dingtalkBody(await send(await this.dingtalkToken()), path)
+    }
+  }
+  /** POSTs a message to a session webhook (which carries its own credential in the URL); returns `'gone'` for an expired or removed one. */
+  async dingtalkWebhook(url: string, body: unknown): Promise<'sent' | 'gone'> {
+    const response = await this.fetcher({ url, method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    let value: { errcode?: number; errmsg?: string } | undefined
+    try { value = JSON.parse(response.text) as typeof value } catch { /* Non-JSON; treated as a failure below. */ }
+    if (response.status >= 200 && response.status < 300 && (value?.errcode ?? 0) === 0) return 'sent'
+    // 310000 "invalid session webhook" / 300006 "session expired" mean the callback window closed; a new reply API call is needed.
+    if (value && (value.errcode === 310000 || value.errcode === 300006 || /session|expire|invalid/i.test(value.errmsg ?? ''))) return 'gone'
+    throw new CliError(`${value?.errmsg ?? 'DingTalk webhook failed'}${value?.errcode ? ` (${value.errcode})` : ''} (HTTP ${response.status})`, value?.errcode, response.status)
+  }
+  private dingtalkBody(response: { status: number; text: string }, path: string): unknown {
+    let value: { errcode?: number; errmsg?: string; [key: string]: unknown } | undefined
+    try { value = JSON.parse(response.text) as typeof value } catch { /* Non-JSON is reported below. */ }
+    if (response.status < 200 || response.status >= 300) {
+      throw new CliError(`${value?.errmsg ?? `HTTP ${response.status}`}${value?.errcode ? ` (${value.errcode})` : ''}`, value?.errcode, response.status)
+    }
+    if (value && typeof value.errcode === 'number' && value.errcode !== 0) {
+      throw new CliError(`${value.errmsg ?? 'DingTalk command failed'} (${value.errcode})`, value.errcode)
+    }
+    return value
+  }
+  /** Obtains (and caches for 100 minutes) an access token for the configured DingTalk app. */
+  private async dingtalkToken(): Promise<string> {
+    const bot = this.deployment.dingtalk
+    if (!bot) throw new Error('The DingTalk Source has no working app')
+    const cached = tokenCache.get(bot.appKey)
+    if (cached && cached.expiresAt > Date.now()) return cached.token
+    const response = await this.fetcher({ url: 'https://api.dingtalk.com/v1.0/oauth2/accessToken', method: 'POST',
+      headers: { 'content-type': 'application/json' }, body: JSON.stringify({ appKey: bot.appKey, appSecret: bot.appSecret }) })
+    const parsed = z.object({ accessToken: z.string().min(1) }).safeParse(JSON.parse(response.text) as unknown)
+    if (!parsed.success) throw new CliError(`DingTalk accessToken failed (HTTP ${response.status})`, undefined, response.status)
+    tokenCache.set(bot.appKey, { token: parsed.data.accessToken, expiresAt: Date.now() + 100 * 60_000 })
+    return parsed.data.accessToken
+  }
 }
+/** In-process DingTalk access tokens by AppKey; the process is the single holder of these credentials, so one cache suffices. */
+const tokenCache = new Map<string, { token: string; expiresAt: number }>()
+/** True when a failure means the access token is stale (HTTP 401, or DingTalk's invalid-token `errcode` 40014): refetch it and retry. */
+const staleToken = (error: unknown): boolean => error instanceof CliError
+  && (error.exitCode === 401 || error.code === 40014 || /token.*(invalid|expired)|invalid.*token/i.test(error.message))

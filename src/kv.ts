@@ -55,4 +55,12 @@ export const KV = {
   feishu: { chats: record<Record<string, boolean>>('feishu-chats'), history: family<string, [chat: string]>('feishu-history:'),
     topics: family<Record<string, string>, [chat: string]>('feishu-history-threads:'),
     seen: family<string[], [thread: string]>('thread-seen:'), initialized: family<boolean, [thread: string]>('thread-initialized:') },
+  /**
+   * DingTalk Source: known conversations (`true` for direct messages), per-helpdesk-template message cursor used by the optional
+   * history backfill, per-polled-thread seen message IDs and initialization flag, and the IDs of outbound messages already sent,
+   * because DingTalk offers no native idempotency key.
+   */
+  dingtalk: { chats: record<Record<string, boolean>>('dingtalk-chats'), history: family<string, [conversation: string]>('dingtalk-history:'),
+    seen: family<string[], [thread: string]>('dingtalk-thread-seen:'), initialized: family<boolean, [thread: string]>('dingtalk-thread-initialized:'),
+    sent: family<string[], [conversation: string]>('dingtalk-sent:') },
 }

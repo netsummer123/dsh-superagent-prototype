@@ -357,6 +357,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/infra/environment.ts` | The agent's process environment: command shims, the git configuration and credential helper, `runAsWorker`, and the checks of the environment and of a Ticket's directory |
 | `src/infra/paths.ts` | The package's root, where packaged files are |
 | `src/infra/text.ts` | Word counts and the chat message limit, `fill` and `sameName` |
+| `src/infra/platform.ts` | Host-platform helpers: the absolute-path shape both platforms accept, `assertNativeAbsolute`, `executableNames` (PATHEXT on Windows), `shimName` (`gh.cmd` on Windows), `sameDirectory`, `withoutDirectory` and `stringEnvironment` |
 | `src/infra/health.ts` | The `HealthBoard`, every part's health entry, each claimed by its one writer |
 | `src/sources/kind.ts` | The `SourceKind` protocol |
 | `src/sources/registry.ts` | `SourceRegistry` |
@@ -374,6 +375,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/feishu-read.ts` | The `feishu/` reads of a Trigger's message, its root, parent and topic, and `feishuThreadContext`, which gives them to assessments with their images |
 | `src/sources/admission-context.ts` | The bounded window an assessment starts from: the first pages of a Trigger's Thread, read through its kind, and the messages around the Trigger |
 | `src/sources/feishu-image.ts` | Reads a Feishu message's image as an attachment for the assessing Session |
+| `src/sources/dingtalk.ts` | The DingTalk kind and plugin entry, exported as `./dingtalk-watch`, and the optional Stream consumer loader |
+| `src/sources/dingtalk-trigger.ts` | DingTalk robot callbacks and history items as Triggers, and DingTalk addresses |
+| `src/sources/dingtalk-loops.ts` | The DingTalk loops: the Stream consumer, optional history backfill, conversation names, and polling of subscribed threads |
+| `src/sources/dingtalk-channel.ts` | The DingTalk Channel: session-webhook and robot-API replies, `sent` or `gone`, and chat links |
+| `src/sources/dingtalk-read.ts` | The `dingtalk/` reads of a Trigger's conversation window and the message it threads under or answers, and `dingtalkThreadContext` for assessments |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
@@ -410,6 +416,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
+| `tests/dingtalk.spec.ts` | The DingTalk Source on a `SourceContext`: translation, the Stream consumer, scope, the Channel's `sent`/`gone`, the Source\'s Policy part and admission rows |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
@@ -421,6 +428,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/queue.spec.ts` | The Runtime's work through the effect queue, and what earlier versions stored |
 | `tests/followups.spec.ts` | A person's follow-up on a Ticket's Thread: its notice to the main Session, the tools that act on it, what a burst costs; a worker's hand-back and context follow, and the main Session's note |
 | `tests/health.spec.ts` | One health entry per part, each cleared by its own next success |
+| `tests/platform.spec.ts` | Cross-platform paths and commands: the absolute-path shape both platforms accept, the native-form check, PATHEXT name resolution, shim naming, and the child environment |
 | `tests/delivery.spec.ts` | `AgentDelivery` |
 | `tests/retry-health.spec.ts`, `tests/role-models.spec.ts` | Model budget retries, and the models of the two roles |
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |

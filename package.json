@@ -16,6 +16,7 @@
     "./client": "./lib/client.js",
     "./github-watch": "./lib/github-watch.js",
     "./feishu-watch": "./lib/feishu-watch.js",
+    "./dingtalk-watch": "./lib/dingtalk-watch.js",
     "./package.json": "./package.json",
     "./locale/*.json": "./locale/*.json"
   },
@@ -58,6 +59,9 @@
   "dependencies": {
     "proper-lockfile": "4.1.2",
     "zod": "4.4.3"
+  },
+  "optionalDependencies": {
+    "dingtalk-stream": "^2.1.6-beta.1"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.5-alpha.1",

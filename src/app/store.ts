@@ -9,6 +9,7 @@ import { SettingsSchema, type Settings, type SettingsOrigin, type SettingsSave }
 import { OLDEST_SCHEMA, SCHEMA_VERSION, migrateTo11, tooOld } from './migration.ts'
 import { Versions } from './versions.ts'
 import { storeReads } from './store-read.ts'
+import { isWindows } from '../infra/platform.ts'
 
 /** A Trigger's position on its thread timeline, ordered by timestamp and then `id` as tie-breaker. */
 export interface TimelinePlace { at: string; id: string }
@@ -60,7 +61,8 @@ export class Store implements Repositories {
     this.db = new DatabaseSync(path)
     this.read = storeReads(this.db)
     try {
-      chmodSync(path, 0o600)
+      // Windows has no file modes; restricting the database to its owner is a POSIX step.
+      if (!isWindows) chmodSync(path, 0o600)
       this.db.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
       const version = this.get(KV.store.schema)
       if (version !== undefined && version > SCHEMA_VERSION) throw new Error(`Unsupported orchestrator database version ${version}`)
