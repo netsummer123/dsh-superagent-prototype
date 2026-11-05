@@ -126,7 +126,7 @@ export function ticketSummary(ticket: Ticket) {
     // Every started Assignment of a Ticket runs in its one shared worker Session.
     deliveryError: attribute(ticket.delivery?.error), sessionId: ticket.assignments.some(item => item.startedAt)
       ? workerSessionId(ticket.id) : '',
-    directory: attribute(ticket.execution?.directory), project: attribute(ticket.execution?.projectId),
+    directory: attribute(ticket.execution?.directory), project: attribute(ticket.execution?.project),
     summary: latestReport(ticket)?.summary ?? '', createdAt: ticket.createdAt,
     updatedAt: ticket.updatedAt }
 }

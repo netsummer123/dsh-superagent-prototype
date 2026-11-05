@@ -98,22 +98,25 @@ export function policySection(settings: Settings, config: PromptConfig = default
   return { key: part, text: fill(builtIn(config, part), { version: policyVersion(settings), mode: settings.eval.mode, rules: rules.join('\n') }) }
 }
 const PROJECTS_HEADING = '## Local projects\n'
-  + 'These local projects are configured on this installation. When you accept a task, set the assessment `project` field to the id of the '
-  + 'project whose directory the work belongs in, choosing by an explicit name or keyword in the task first, then by which project\'s description '
-  + 'best fits the task. Omit `project` only when no project clearly matches; the task then falls back to the default ticket directory. Never invent an id. '
+  + 'These local projects are configured on this installation. When you accept a task, set the assessment `project` field to the exact '
+  + 'name of the project whose directory the work belongs in. Decide by an explicit project name or keyword in the task first, then by a '
+  + 'project directory the task names, then by which project the task evidently concerns. A project may list no keywords: match such a '
+  + 'project by its name and directory alone, and never treat missing keywords as a reason to skip it. Put the name in `project` itself; '
+  + 'naming the project only in `note`, in the scope or in the acknowledgement does not route the work, and the ticket falls back to the '
+  + 'default ticket directory. Omit `project` only when no project clearly matches, and never invent a name: an unknown name is ignored. '
   + 'The `project` field only chooses the workspace directory: it does not change whether or how the request is accepted.'
 /**
- * The main Session's project-routing section: the enabled local projects one per line (id, name, keywords, description), or nothing while
- * no project is configured. Each field is flattened onto one line so a line reads as one project, never as a heading of its own.
+ * The main Session's project-routing section: each configured project on one line as its name, its directory and, when it has any,
+ * its keywords, or nothing while no project is configured. Every field is flattened onto one line so a line reads as one project,
+ * never as a heading of its own.
  */
 export function projectsSection(settings: Settings): string {
   const line = (text: string) => text.replace(/\s*\n\s*/g, ' ').trim()
-  const projects = settings.executor.projects.filter(project => project.enabled)
+  const projects = settings.projects.items
   if (!projects.length) return ''
-  const body = projects.map(({ id, name, keywords, description }) => {
-    const parts = [`- ${line(name)} (${id})`]
+  const body = projects.map(({ name, path, keywords }) => {
+    const parts = [`- ${line(name)}`, `directory: ${line(path)}`]
     if (keywords.length) parts.push(`keywords: ${keywords.map(line).join(', ')}`)
-    if (description) parts.push(`description: ${line(description)}`)
     return parts.join('; ')
   })
   return `${PROJECTS_HEADING}\n${body.join('\n')}`

@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { mkdir, rmdir, stat } from 'node:fs/promises'
+import { mkdir, readdir, rmdir, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { key, latestAssignment, latestReport, liveTicket, runningAssignment, threadKey, waitsForPerson } from '../core/index.ts'
 import type { AssessmentOutcome, Assignment, EngineForExecutor, Execution, Executor, Mandate, PolicyEffect, Ticket, TicketInput, Trigger }
@@ -55,16 +55,37 @@ export function transient(error: unknown): boolean {
 }
 /** Appends a stable 12-character ticket ID suffix to a validated English worktree name. */
 const ticketWorktreeName = (name: string, id: string): string => `${WorktreeNameSchema.parse(name)}-${id.slice(0, 12)}`
+/** Whether `directory` is the root of a git work tree, which is what makes a project able to give each ticket a work tree. */
+const isRepository = (directory: string): Promise<boolean> => stat(join(directory, '.git')).then(() => true, () => false)
 /**
- * Whether `projectId` is occupied by another ticket, so `ticketId` must wait before launching: another ticket for the same
- * project is either mid-launch (`starting`, a project id to ticket id map) or running (per `isRunning`). A project ticket
- * develops in one shared directory, so only one ticket per project may proceed at a time. Pure, so it is tested directly.
+ * The repository a project develops in: the project directory itself when it is one, otherwise the single immediate subdirectory
+ * that is one, so one project may hold several repositories and some project materials without extra configuration. A project with
+ * no repository, or with several competing ones, has no single answer: it develops in place, where the whole directory is visible
+ * and the project lock keeps its tickets one at a time. `node_modules` and dotted directories are never searched.
  */
-export function projectOccupied(projectId: string, ticketId: string, starting: ReadonlyMap<string, string>,
+export async function findRepo(path: string): Promise<string | undefined> {
+  if (await isRepository(path)) return path
+  const entries = await readdir(path, { withFileTypes: true }).catch(() => [])
+  const repos: string[] = []
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue
+    const child = join(path, entry.name)
+    if (await isRepository(child)) repos.push(child)
+  }
+  return repos.length === 1 ? repos[0] : undefined
+}
+/**
+ * Whether `project` (a project name) is occupied by another ticket, so `ticketId` must wait before launching: another ticket
+ * for the same project is either mid-launch (`starting`, a project name to ticket id map) or running (per `isRunning`). A
+ * project ticket develops in one shared directory, so only one ticket per project may proceed at a time. Pure, so it is
+ * tested directly.
+ */
+export function projectOccupied(project: string, ticketId: string, starting: ReadonlyMap<string, string>,
   open: readonly Ticket[], isRunning: (ticket: Ticket) => boolean): boolean {
-  const launching = starting.get(projectId)
+  const launching = starting.get(project)
   if (launching && launching !== ticketId) return true
-  return open.some(ticket => ticket.id !== ticketId && ticket.execution?.projectId === projectId && isRunning(ticket))
+  // A ticket in a work tree of its project has a directory of its own, so it holds nothing of the project's directory.
+  return open.some(ticket => ticket.id !== ticketId && ticket.execution?.project === project && !ticket.execution?.repo && isRunning(ticket))
 }
 /** Host dependencies used by `DshExecutor`. */
 export interface ExecutorHost {
@@ -118,11 +139,12 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  // A matched, enabled project makes the project's own directory the workspace (developing in place); otherwise the ticket
-  // gets its own directory under the execution root, as before. A project id the settings do not hold falls back, never throws.
-  const project = outcome.project ? settings.executor.projects.find(item => item.id === outcome.project && item.enabled) : undefined
+  // A matched project is the workspace; whether that means its own directory or a work tree of a repository inside it is decided
+  // when the ticket is prepared, because it depends on what the directory holds (see `prepareDirectory`). A project name the
+  // settings do not hold falls back, never throws.
+  const project = outcome.project ? settings.projects.items.find(item => item.name === outcome.project) : undefined
   const directory = project ? project.path : join(executionRoot(settings, stateDir), name)
-  return { name, directory, assignment, ...(project ? { projectId: project.id } : {}) }
+  return { name, directory, assignment, ...(project ? { project: project.name } : {}) }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -238,9 +260,10 @@ export class DshExecutor implements Executor {
   /** When a person's message typed into a worker's Session last started a turn, by ticket. */
   private readonly personal = new Map<string, string>()
   /**
-   * Tickets in the middle of a launch, by project id. A project ticket develops in place in one shared directory, so at most
-   * one ticket per project may launch or run at a time; this holds the launch slot from reservation until the worker starts or
-   * the launch ends, so a second ticket for the same project waits instead of writing to the directory concurrently.
+   * Tickets in the middle of a launch, by project name. A project ticket that develops in place shares one directory with
+   * the project itself, so at most one ticket per project may launch or run at a time; this holds the launch slot from
+   * reservation until the worker starts or the launch ends, so a second ticket for the same project waits instead of
+   * writing to the directory concurrently. A work-tree ticket has a directory of its own and holds no such turn.
    */
   private readonly projectStarting = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
@@ -260,27 +283,37 @@ export class DshExecutor implements Executor {
     return { ...ticket, execution: ticketExecution(ticket, outcome, this.host.store.settings(), this.host.machine.stateDir) }
   }
   /**
-   * Runs the configured `executor.prepare` command for a new ticket workspace in its parent directory with the ticket's
-   * execution environment variables, then verifies the directory as the worker sees it.
+   * Prepares a ticket's workspace before its worker starts, one of three ways.
+   * A work-tree ticket gets a fresh `git worktree` of its project's repository under the execution root, on a branch of its own, so
+   * no two tickets ever share a checkout and the project's own directory is never written to.
+   * A project ticket without a repository develops in place: its directory must already exist and nothing runs inside it, so a
+   * mistyped project path never turns into an empty workspace the worker mistakes for the project.
+   * Any other ticket runs the configured `executor.prepare` command in its parent directory with the ticket's execution environment.
    * A failed prepare command throws `PrepareFailed`, which is not retried automatically; an empty directory it left is removed, a non-empty one kept.
-   * @throws PrepareFailed with the command's output when the prepare command fails.
+   * @throws PrepareFailed with the command's or git's output when preparation fails.
    */
   private async prepareDirectory(ticket: Ticket): Promise<void> {
     const directory = ticket.execution?.directory ?? ''
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
     // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
     const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
-    // A ticket routed to a project develops in that project's existing directory: never create or remove it, only verify it is
-    // usable and run the project's optional prepare command inside it. A missing directory fails instead of being made, so a
-    // mistyped project path never turns into an empty workspace the worker mistakes for the project.
-    if (ticket.execution?.projectId) {
-      const project = this.host.store.settings().executor.projects.find(item => item.id === ticket.execution?.projectId)
+    if (ticket.execution?.repo) {
+      await this.addWorktree(ticket.execution.repo, directory, ticket, signal, env)
+      return
+    }
+    if (ticket.execution?.project) {
+      const settings = this.host.store.settings()
+      const project = settings.projects.items.find(item => item.name === ticket.execution?.project)
+      const repo = project ? await findRepo(project.path) : undefined
+      if (repo) {
+        const worktree = join(executionRoot(settings, this.host.machine.stateDir), ticket.execution.name)
+        this.adoptWorktree(ticket, repo, worktree)
+        await this.addWorktree(repo, worktree, ticket, signal, env)
+        return
+      }
       await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime).catch((error: unknown) => {
         throw new PrepareFailed(`The project directory is not usable: ${error instanceof Error ? error.message : String(error)}`)
       })
-      const command = (project?.prepare ?? '').trim()
-      if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], directory, signal, env)
-        .catch((error: unknown) => { throw new PrepareFailed(`The project prepare command failed: ${error instanceof Error ? error.message : String(error)}`) })
       return
     }
     await mkdir(dirname(directory), { recursive: true })
@@ -294,6 +327,50 @@ export class DshExecutor implements Executor {
     await mkdir(directory, { recursive: true })
     await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
   }
+  /**
+   * Records on the ticket that it develops in `directory`, a work tree of `repo`, so its workspace, the lock its project takes and
+   * the cleanup at its end all follow the ticket rather than a registry entry that may be renamed or deleted meanwhile.
+   */
+  private adoptWorktree(ticket: Ticket, repo: string, directory: string): void {
+    const execution = ticket.execution
+    if (!execution || (execution.repo === repo && execution.directory === directory)) return
+    const next = { ...ticket, execution: { ...execution, directory, repo } }
+    this.host.store.atomic(() => this.host.store.tickets.save(next))
+    ticket.execution = next.execution
+  }
+  /**
+   * Creates the ticket's own work tree of `repo` at `directory` on the branch `agent/<ticket name>`, reusing one a previous attempt
+   * already made so a retried launch does not fail on its own leftovers. Stale registrations of work trees deleted outside git are
+   * pruned first, which also keeps a repository whose project was removed from accumulating them.
+   */
+  private async addWorktree(repo: string, directory: string, ticket: Ticket, signal: AbortSignal, env: Record<string, string>): Promise<void> {
+    const git = (argv: string[], cwd = repo) => runAsWorker(this.host.context.subprocess, ['git', '-C', cwd, ...argv], cwd, signal, env)
+    await git(['rev-parse', '--show-toplevel']).catch((error: unknown) => {
+      throw new PrepareFailed(`The project repository is not usable: ${error instanceof Error ? error.message : String(error)}`)
+    })
+    const exists = await stat(directory).then(() => true, () => false)
+    if (!exists) {
+      await git(['worktree', 'prune']).catch(() => '')
+      // `-B` creates the branch, or resets it when a previous attempt already made one, so a retried launch is idempotent.
+      await git(['worktree', 'add', '--force', '-B', `agent/${ticket.execution?.name ?? ticket.id}`, directory, 'HEAD'])
+        .catch(async (error: unknown) => {
+          await rmdir(directory).catch(() => { /* git cleans up after itself; this only covers a partial checkout. */ })
+          throw new PrepareFailed(`The project work tree could not be created: ${error instanceof Error ? error.message : String(error)}`)
+        })
+    }
+    await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
+  }
+  /**
+   * Drops the registration of a work tree whose directory is already gone, so a repository does not accumulate dangling entries.
+   * A work tree that still exists is left alone: it holds whatever the worker did not commit, which is the operator's to inspect.
+   */
+  private async pruneWorktree(ticket: Ticket): Promise<void> {
+    const repo = ticket.execution?.repo, directory = ticket.execution?.directory
+    if (!repo || !directory) return
+    if (await stat(directory).then(() => true, () => false)) return
+    const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
+    await runAsWorker(this.host.context.subprocess, ['git', '-C', repo, 'worktree', 'prune'], repo, signal).catch(() => '')
+  }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {
     this.host.effects.enqueue('launch', assignment.id, { ticketId: ticket.id, assignmentId: assignment.id })
@@ -305,9 +382,9 @@ export class DshExecutor implements Executor {
     const ticket = this.host.store.tickets.get(ticketId)
     const assignment = ticket && latestAssignment(ticket)
     if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') return
-    // A project ticket develops in place, so only one ticket per project may launch or run at a time. While another ticket for
-    // this project is launching or running, this launch waits (a `Later` reschedules it) rather than write to the same directory.
-    const project = ticket.execution?.projectId
+    // A project ticket that develops in place shares that directory with the project, so only one of its tickets may launch or run
+    // at a time. A work-tree ticket has a directory of its own and needs no such turn.
+    const project = ticket.execution?.repo ? undefined : ticket.execution?.project
     if (project && this.projectBusy(project, ticketId)) throw new Later(`Project ${project} is busy with another ticket`)
     this.slots.reserve(ticketId, 'launch')
     if (project) this.projectStarting.set(project, ticketId)
@@ -326,8 +403,8 @@ export class DshExecutor implements Executor {
     }
   }
   /** Whether a project is occupied by another ticket that is launching or running, so `ticketId` must wait its turn. */
-  private projectBusy(projectId: string, ticketId: string): boolean {
-    return projectOccupied(projectId, ticketId, this.projectStarting,
+  private projectBusy(project: string, ticketId: string): boolean {
+    return projectOccupied(project, ticketId, this.projectStarting,
       this.host.store.tickets.open(), ticket => this.running(ticket))
   }
   /**
@@ -412,6 +489,8 @@ export class DshExecutor implements Executor {
       if (!ownTurn) this.host.context.agents.get(sessionId as SessionId)?.cancel({ kind: 'user' }, { keepInbox: false })
       // Its shell jobs and subagents stop with it, also those of a worker that ends its own turn.
       this.stopWork(ticket.id, reason)
+      // A work tree whose directory a person already removed is unregistered from its repository, best effort after the commit.
+      void this.pruneWorktree(ticket)
       this.left.get(ticket.id)?.collect.abort(); this.left.delete(ticket.id); this.personal.delete(ticket.id)
     })
   }
@@ -476,20 +555,22 @@ export class DshExecutor implements Executor {
       return !!stored && liveTicket(stored) && latestAssignment(stored)?.id === assignment.id
     }
     const source = sourceTrigger(this.host, ticket)
-    const workspace = ticket.execution?.directory ?? ''
+    const planned = ticket.execution?.directory ?? ''
     if (!current()) return
     // A ticket routed to no project while the settings say to stop instead of falling back must not start.
     const settings = this.host.store.settings()
-    if (settings.executor.matchFallback === 'stop' && settings.executor.projects.length && !ticket.execution?.projectId) {
+    if (settings.projects.matchFallback === 'stop' && settings.projects.items.length && !ticket.execution?.project) {
       throw new PrepareFailed('No local project matched this ticket, and the fallback is set to not start it')
     }
-    // A project ticket develops in an existing directory, so prepare (verify + the project prepare command) must run even though
-    // the directory already exists. Otherwise prepare runs once, only while the ticket's own directory does not yet exist.
-    if (ticket.execution?.projectId || !await stat(workspace).then(() => true, () => false)) {
+    // A project ticket is prepared every time, because preparing it also decides whether it develops in the project directory or
+    // in a work tree of a repository inside it. Any other ticket is prepared once, only while its own directory does not yet exist.
+    if (ticket.execution?.project || !await stat(planned).then(() => true, () => false)) {
       await this.prepareDirectory(ticket)
       if (!current()) return
     }
     if (!current()) return
+    // Preparation may have moved the ticket into a work tree, so the workspace is read back rather than reused.
+    const workspace = this.host.store.tickets.get(ticket.id)?.execution?.directory ?? planned
     const sessionId = workerSessionId(ticket.id)
     const agent = await this.host.sessions.ensure(sessionId, workspace, ticket.title, 'worker')
     if (!current()) return

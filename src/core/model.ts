@@ -312,7 +312,19 @@ export interface Ticket {
  * Thread closed; the ticket then ends unless its work has not finished (see `Tickets.unfinished`).
  */
 export interface Follow { thread: string; own: boolean; closed?: { at: string; outcome: 'merged' | 'closed' } }
-export interface Execution { name: string; directory: string; assignment: string; /** The local project it was routed to, when one matched. */ projectId?: string }
+export interface Execution {
+  name: string
+  directory: string
+  assignment: string
+  /** The name of the local project it was routed to, when one matched. */
+  project?: string
+  /**
+   * Absolute directory of the git repository this ticket got its own work tree of. Present only for a work-tree ticket, whose
+   * `directory` is that work tree under the execution root; recorded here so cleanup never depends on the project registry, which
+   * may have been renamed or deleted since. Absent means the ticket develops in place.
+   */
+  repo?: string
+}
 
 /** Whether a ticket is open: it has not ended. */
 export const liveTicket = (ticket: Pick<Ticket, 'ended'>): boolean => !ticket.ended

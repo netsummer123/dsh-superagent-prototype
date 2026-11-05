@@ -88,29 +88,32 @@ export const EvalConfigSchema = z.object({
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)
-/** A local project a ticket may be routed to: an absolute directory plus the metadata an assessment matches it by. */
+/**
+ * A local project a ticket may be routed to: its name (the identity an assessment names), the absolute directory it covers, and
+ * optional keywords that make the name easier to match. Whether a ticket works in a work tree is discovered from the directory
+ * itself (see `findRepo`), so a project that holds several repositories and some materials needs no extra setting.
+ */
 export const ProjectSchema = z.object({
-  id: z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, 'A lowercase kebab-case project id'),
-  name: z.string().trim().min(1).max(80),
+  name: z.string().trim().min(1).max(LIMITS.projectName),
   path: z.string().trim().refine(path => ABSOLUTE_PATH.test(path), 'The project directory must be an absolute path'),
-  keywords: z.array(z.string().trim().min(1).max(60)).max(40).default([]),
-  description: z.string().trim().max(500).default(''),
-  /** An optional command run inside the project directory before the worker starts (such as fetching or checking out a branch). */
-  prepare: z.string().max(LIMITS.prepareCommand).default(''),
-  enabled: z.boolean().default(true),
+  keywords: z.array(z.string().trim().min(1).max(LIMITS.projectKeyword)).max(40).default([]),
 }).strict()
 export type Project = z.infer<typeof ProjectSchema>
-/** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, blocked commands, and the local project registry. */
+/** The local project registry: the projects a ticket may be routed to, and what happens to a ticket that matches none of them. */
+export const ProjectsConfigSchema = z.object({
+  items: z.array(ProjectSchema)
+    .refine(items => new Set(items.map(item => item.name.trim().toLowerCase())).size === items.length, 'Duplicate project names')
+    .default([]),
+  /** What to do when a ticket matches no project: `directory` falls back to the ticket directory root; `stop` refuses to launch it. */
+  matchFallback: z.enum(['directory', 'stop']).default('directory'),
+}).strict()
+/** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command and blocked commands. */
 export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
   directory: z.string().trim().refine(path => path === '' || ABSOLUTE_PATH.test(path), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
-  /** Local projects an assessment may route a ticket to; an empty list disables project matching and every ticket uses `directory`. */
-  projects: z.array(ProjectSchema).default([]),
-  /** What to do when a ticket matches no project: `auto` falls back to `directory`; `stop` refuses to launch it. */
-  matchFallback: z.enum(['directory', 'stop']).default('directory'),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({
@@ -119,9 +122,10 @@ export const SettingsSchema = z.object({
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
+  projects: ProjectsConfigSchema.default(() => ProjectsConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsBlock = 'policy' | 'eval' | 'executor' | `source:${string}`
+export type SettingsBlock = 'policy' | 'eval' | 'executor' | 'projects' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 

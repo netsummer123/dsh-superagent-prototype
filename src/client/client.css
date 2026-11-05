@@ -103,6 +103,10 @@
 .dt-rule-body { display: flex; flex-direction: column; gap: 12px; padding: 8px 0 8px 28px; }
 .dt-model { display: flex; flex-direction: column; gap: 6px; }
 .dt-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.dt-projects td, .dt-projects th { padding: 4px 6px; vertical-align: middle; }
+.dt-projects td:last-child, .dt-projects th:last-child { width: 56px; text-align: right; }
+.dt-projects .dt-input { width: 100%; }
+.dt-danger-link { color: var(--dsw-alias-state-error-primary); }
 .dt-changes { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 20px; }
 .dt-changes li::before { content: '· '; color: var(--dsw-alias-label-caption); }
 .dt-main { display: flex; flex-direction: column; gap: 24px; min-width: 0; }

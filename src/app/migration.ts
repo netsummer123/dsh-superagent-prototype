@@ -1,5 +1,5 @@
 /**
- * Migrates a schema 10 database to schema 11 in a single transaction so runtime readers never convert legacy shapes.
+ * Migrates a schema 10 database to schema 13 in a single transaction so runtime readers never convert legacy shapes.
  * Databases older than schema 10 are rejected: this version cannot migrate them.
  */
 import { basename } from 'node:path'
@@ -17,7 +17,7 @@ import type { SettingsVersion, Store } from './store.ts'
 import { Versions } from './versions.ts'
 import { KV, type Key } from '../kv.ts'
 
-export const SCHEMA_VERSION = 11
+export const SCHEMA_VERSION = 13
 /** The oldest database schema version this build can open and migrate directly. */
 export const OLDEST_SCHEMA = 10
 /** Returns an error message explaining why `version` cannot be opened: older schemas need a new state directory. */
@@ -176,6 +176,75 @@ function settingsAsVersions(store: Store): void {
   store.delete('settings')
 }
 
+/**
+ * Rewrite settings records for schema 12: the local project registry leaves the `executor` block for its own `projects` block,
+ * which drops the per-project id, description, prepare command and enabled flag. An entry that fails the new schema is left
+ * as it is, so a corrupt record still surfaces its own error rather than being silently dropped.
+ */
+export function migrateTo12(store: Store): void {
+  const rewrite = (settings: unknown): unknown => {
+    if (!isObject(settings)) return settings
+    const moved = SettingsSchema.safeParse(moveProjectsOutOfExecutor(settings))
+    return moved.success ? moved.data : settings
+  }
+  step('the settings', () => {
+    const stored = store.get<unknown>('settings')
+    if (stored !== undefined) store.set('settings', rewrite(stored))
+  })
+  step('the settings history', () => {
+    for (const name of store.keys('settings-version:')) {
+      const version = store.get<{ settings: unknown }>(name)!
+      store.set(name, { ...version, settings: rewrite(version.settings) })
+    }
+  })
+}
+
+/** Two directory strings that name the same place: separators unified, case folded, surrounding space and a trailing slash ignored. */
+const sameDirectoryText = (a: string, b: string): boolean => {
+  const normal = (value: string) => value.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  return normal(a) !== '' && normal(a) === normal(b)
+}
+/** The registry entry whose directory is `directory`, as far as a stored Ticket needs to resolve its project name. */
+type ProjectNames = readonly { name: string; path: string }[]
+/**
+ * Give a stored Ticket the project name the current shape records, taken from the legacy `execution.projectId` field: the
+ * registry entry whose directory is the ticket's workspace supplies the name, and an entry that is gone leaves the id as the
+ * name. A Ticket that never recorded a project, or already carries a name, is returned unchanged. Also covers open Tickets
+ * created before the rename, which would otherwise take the fallback prepare path over their project directory.
+ */
+export function withProjectName(ticket: unknown, items: ProjectNames): unknown {
+  if (!isObject(ticket) || !isObject(ticket.execution)) return ticket
+  const { projectId, ...execution } = ticket.execution
+  if (typeof projectId !== 'string' || !projectId) return ticket
+  const directory = typeof execution.directory === 'string' ? execution.directory : ''
+  const matched = items.find(item => sameDirectoryText(item.path, directory))
+  const existing = typeof execution.project === 'string' && execution.project.trim() ? execution.project : undefined
+  return { ...ticket, execution: { ...execution, project: existing ?? matched?.name ?? projectId } }
+}
+/** The stored project registry, read straight from settings so a migration does not depend on the schema it is upgrading. */
+function storedProjects(store: Store): ProjectNames {
+  const settings = store.get<{ projects?: { items?: unknown } }>('settings')
+  const items = settings?.projects?.items
+  if (!Array.isArray(items)) return []
+  return items.flatMap(item => isObject(item) && typeof item.name === 'string' && typeof item.path === 'string'
+    ? [{ name: item.name, path: item.path }] : [])
+}
+/**
+ * Rewrite every stored Ticket for schema 13: the project a Ticket was routed to is recorded as its name in `execution.project`
+ * rather than the removed `execution.projectId`, so a Ticket that outlives the upgrade keeps its workspace and its project lock.
+ */
+export function migrateTo13(store: Store): void {
+  const items = storedProjects(store)
+  const update = store.db.prepare('UPDATE ticket SET value = ? WHERE id = ?')
+  for (const row of store.db.prepare('SELECT id, value FROM ticket').all()) {
+    step(`ticket ${String(row.id)}`, () => {
+      const value = JSON.parse(String(row.value)) as Stored
+      const next = withProjectName(value, items)
+      if (next !== value) update.run(JSON.stringify(next), String(row.id))
+    })
+  }
+}
+
 /** Settings save origin names recorded by versions before schema 11, mapped to current `SettingsOrigin` values. */
 const ORIGINS: Readonly<Record<string, SettingsOrigin>> = { web: 'panel', 'orchestrator-tool': 'tool', 'policy-sync': 'sync', 'member-sync': 'sync' }
 /** Source kinds removed from dsh-superagent; the unified `github` Source now ingests Issues via notifications. */
@@ -198,6 +267,27 @@ function migrateSettingsRecords(store: Store): void {
   }
 }
 interface Member { name?: string; feishuId?: string; github?: string }
+/**
+ * Move the local project registry out of the `executor` block into its own `projects` block, keeping only a project's name,
+ * directory and keywords (an older entry's id becomes its name when the name is missing, and a disabled entry is dropped).
+ * Applied to active settings and to every saved revision, so a database written before this shape still opens.
+ */
+export function moveProjectsOutOfExecutor(value: Stored): Stored {
+  if (!isObject(value) || !isObject(value.executor)) return value
+  const { projects: legacy, matchFallback, ...executor } = value.executor
+  const items = Array.isArray(legacy) ? legacy.flatMap(item => {
+    if (!isObject(item)) return []
+    if (item.enabled === false) return []
+    const name = text(item.name) ?? text(item.id)
+    const path = text(item.path)
+    const keywords = Array.isArray(item.keywords) ? item.keywords.filter(keyword => typeof keyword === 'string' && keyword.trim()) : []
+    return name && path ? [{ name, path, keywords }] : []
+  }) : undefined
+  const existing = isObject(value.projects) ? value.projects : undefined
+  const merged = existing ?? (items === undefined && matchFallback === undefined ? undefined
+    : { items: items ?? [], ...(typeof matchFallback === 'string' ? { matchFallback } : {}) })
+  return { ...value, executor, ...merged ? { projects: merged } : {} }
+}
 /**
  * Convert legacy flat settings (chat lists in Policy, top-level pause flag) or pre-schema-11 domain settings into current domain blocks:
  * strips fields replaced by rule instructions and prompts (Executor reviewers and branch prefix, rule `visual` flag, `autoMergeLineLimit`, Source `authority`, GitHub `mergeCli`), extracts `paused` to the top level, and splits cross-source `members` into per-source `policy.sources` entries.
@@ -241,9 +331,9 @@ function withoutRemovedFields(value: Stored): Stored {
   })) : undefined
   // Rewrite environment variable prefixes from the project's earlier names in `prepare` commands.
   if (typeof kept.prepare === 'string') kept.prepare = kept.prepare.replace(/\bDSH_(?:TAG|GO|FREELANCER)_/g, 'DSH_SUPERAGENT_')
-  return { ...rest, ...(typeof paused === 'boolean' ? { paused } : {}), ...(executor ? { executor: kept } : {}),
+  return moveProjectsOutOfExecutor({ ...rest, ...(typeof paused === 'boolean' ? { paused } : {}), ...(executor ? { executor: kept } : {}),
     ...(instances ? { sources: instances } : {}),
-    ...(policy ? { policy: { ...policyRest, ...(rules ? { rules } : {}), ...(parts ? { sources: parts } : {}) } } : {}) }
+    ...(policy ? { policy: { ...policyRest, ...(rules ? { rules } : {}), ...(parts ? { sources: parts } : {}) } } : {}) })
 }
 
 /** Prompt configuration shape saved before team sections existed, when all sections (including fixed ones) were editable. */

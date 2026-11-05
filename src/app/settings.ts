@@ -2,7 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { z } from 'zod'
 import { UserError, type EngineForSettings } from '../core/index.ts'
-import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
+import { EvalConfigSchema, ExecutorConfigSchema, PolicyConfigSchema, ProjectsConfigSchema, SettingsSchema, policyEffects, policyVersion } from '../policy.ts'
 import type { Settings as SettingsValue, SettingsBlock, SettingsOrigin, SettingsSave } from '../policy.ts'
 import type { SourceHost } from '../sources/host.ts'
 import type { HealthBoard, HealthEntry } from '../infra/health.ts'
@@ -29,7 +29,7 @@ interface Block {
   merge(settings: SettingsValue, value: unknown, id: string): SettingsValue
   guard?(current: SettingsValue, candidate: SettingsValue, origin: SettingsOrigin): void
 }
-const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
+const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'projects' | 'source', Block> = {
   policy: {
     parse: (value, sources) => {
       const policy = PolicyConfigSchema.parse(value)
@@ -43,6 +43,16 @@ const BLOCKS: Record<'policy' | 'eval' | 'executor' | 'source', Block> = {
     merge: (settings, value) => ({ ...settings, executor: value as SettingsValue['executor'] }),
     // Only the management panel may modify shell execution paths or commands.
     guard: (current, candidate, origin) => { if (origin !== 'panel' && environment(current) !== environment(candidate)) throw new UserError('panelOnlyEnvironment') },
+  },
+  projects: {
+    parse: value => ProjectsConfigSchema.parse(value),
+    merge: (settings, value) => ({ ...settings, projects: value as SettingsValue['projects'] }),
+    // Project directories are written by the worker: only a person in the panel may point a project at a new directory.
+    guard: (current, candidate, origin) => {
+      if (origin === 'panel') return
+      const paths = (value: SettingsValue) => JSON.stringify(value.projects.items.map(item => item.path))
+      if (paths(current) !== paths(candidate)) throw new UserError('panelOnlyProjectPaths')
+    },
   },
   source: {
     parse: (value, sources, id) => sources.validate(id, z.object({ enabled: z.boolean(), config: z.unknown() }).parse(value)),
@@ -117,6 +127,7 @@ export class Settings {
       pause: { revision: revision('pause'), value: { paused: settings.paused } },
       eval: { revision: revision('eval'), value: settings.eval },
       executor: { revision: revision('executor'), value: settings.executor },
+      projects: { revision: revision('projects'), value: settings.projects },
       policy: { revision: revision('policy'), rules: rules.map(rule => ({ id: rule.id, name: rule.name, enabled: rule.enabled })),
         allowed: Object.fromEntries(Object.entries(parts).map(([id, part]) => [id, part.allowed.length])), read: 'settings/policy' },
       sources: sources.instances(settings).map(({ id, kind, enabled, installed }) =>
@@ -131,7 +142,7 @@ export class Settings {
     const { store, sources } = this.host
     const settings = store.settings(), id = block.startsWith('source:') ? block.slice('source:'.length) : undefined
     const instance = id === undefined ? undefined : sources.instances(settings).find(item => item.id === id)
-    const value = block === 'pause' ? { paused: settings.paused } : block === 'policy' || block === 'eval' || block === 'executor' ? settings[block]
+    const value = block === 'pause' ? { paused: settings.paused } : block === 'policy' || block === 'eval' || block === 'executor' || block === 'projects' ? settings[block]
       : instance ? { enabled: instance.enabled, config: instance.config } : undefined
     if (value === undefined) throw new UserError('unknownBlock', { block })
     return { block, revision: store.blockRevision(block as SettingsSave), value }

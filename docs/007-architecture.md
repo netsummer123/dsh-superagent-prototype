@@ -159,7 +159,7 @@ Its interfaces are grouped by purpose:
 - **Outbox receipts:** `replyStatus` and `receipts`, written only by Outbox. Receipt operations are `get`, `waiting`, `behind`, `add`, `settle` and `withdraw`. `behind` checks whether an earlier message for the same Ticket and conversation is waiting with fewer than three failures. A withdrawn message settles with `channelGone` or `channelIgnored`. Read queries expose failed and dropped replies through `failingReplies`, `droppedReplies` and `droppedSince`.
 - **Typed key-value records:** `get`, `set`, `delete` and `keys`, using entries from `KV`.
 
-`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the schema 11 migration converts older supported records at startup.
+`afterCommit` runs an action only after the transaction commits, never after rollback. Runtime reads records in their stored shape; the migrations to schema 13 convert older supported records at startup.
 
 ### Effects
 
@@ -200,9 +200,11 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 
 `prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: short name, directory and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id.
 
-`ticketExecution` decides the workspace: a Ticket whose assessment named an enabled local project gets that project's own directory (developed in place) and records `execution.projectId`; any other Ticket gets `<directory root>/<name>-<id>`, as before. A project id the settings no longer hold — an unknown, renamed or disabled one — falls back silently, so a model's mistake never sends work into the wrong directory. `prepareDirectory` treats the two cases apart: a project directory must already exist and is never created or removed (only verified, then the project's own `prepare` command runs inside it), while a ticket directory is created under the root and its root-level `prepare` runs in the parent, as before.
+`ticketExecution` decides the workspace: a Ticket whose assessment named a local project in the registry is planned at that project's directory and records `execution.project` as the project's name; any other Ticket gets `<directory root>/<name>-<id>`, as before. A name the registry does not hold — unknown, misspelled or removed — falls back silently, so a model's mistake never sends work into the wrong directory.
 
-Because a project directory is shared, `projectOccupied` keeps one Ticket per project in flight: `launchQueued` raises `Later` while another Ticket of the same project is launching (`projectStarting`) or running, and the `launch` effect reschedules it. The `matchFallback` setting decides what happens when nothing matched: `directory` uses the root, and `stop` refuses to start the Ticket, which fails with a reason and waits for a person.
+Preparation then decides how a project Ticket develops, because only the filesystem can tell. `findRepo` looks for a repository: the project directory itself, or the single immediate subdirectory that is one. With a repository the Ticket gets its own `git worktree` of it under the execution root, on the branch `agent/<ticket name>`, and `execution.repo` records the repository — so its workspace, its lock and its cleanup follow the Ticket rather than a registry entry that may be renamed or deleted. Without one — no repository, or several competing ones, as a project holding `web/`, `api/` and materials does — it develops in place in the project directory, where the whole directory is visible, and its project lock keeps its Tickets one at a time. Either way the project directory itself is never created or removed: the work-tree path only ever adds a work tree, and the in-place path only ever verifies.
+
+The registry's `matchFallback` setting decides what happens when nothing matched: `directory` uses the root, and `stop` refuses to start the Ticket, which fails with a reason and waits for a person.
 
 `WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
 
@@ -324,7 +326,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/notices.ts` | The main Session's notices and relays: `eventNotice`, `reportRelay`, `resultRelay` and `followupRelay` |
 | `src/app/store.ts` | The Store, and `Receipt`, a message of the outbox |
 | `src/app/store-read.ts` | `storeReads`: the Store's read queries for the views, the tools and the Sources' polls, which never write |
-| `src/app/migration.ts` | The schema 11 migration: one step from schema 10 that writes every stored record in its current shape |
+| `src/app/migration.ts` | The migrations to schema 13: one step from schema 10 that writes every stored record in its current shape, then the local project registry's own block and a Ticket's recorded project name |
 | `src/app/effects.ts` | Effects |
 | `src/app/versions.ts` | `Versions`: a record kept as numbered snapshots with a pointer to the current one, for the settings and the prompts |
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
@@ -396,6 +398,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/route.ts` | The tabs, the settings groups, the typed routes that `parseRoute` reads, and the route memory with the settings group opened last |
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
+| `src/client/projects.tsx` | The local project registry settings group: one row per project, its name, directory and keywords, removed by a delete button |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
 | `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
 | `src/client/settings-kit.tsx` | The building blocks of settings blocks: the settings the stage groups share, `useBlockDraft`, the fields, among them a Source kind's, and the history of saves |
@@ -448,10 +451,10 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/settings.spec.ts` | Settings saves that race a model or account check, a Policy sync that a save outran, and the refusals of the pause, a sync and a block |
 | `tests/views.spec.ts` | What the management views derive from the Store, such as the Thread a dropped message belongs to |
 | `tests/timeline.spec.ts` | A Thread's pages and a Trigger's neighbours by time and then id, with every received Trigger's time in one form |
-| `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
+| `tests/migration.spec.ts` | The schema 13 migrations: every stored record in its current shape, the project registry move and a Ticket's project name, and the refusal of older schemas |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
-| `tests/projects.spec.ts` | Project routing: `ticketExecution` choosing a project's directory or falling back, the assessor's projects section, and the `DSH_SUPERAGENT_PROJECT` variable |
+| `tests/projects.spec.ts` | Project routing: the registry schema (keywords optional, duplicate names refused), `ticketExecution` choosing a project's directory or falling back, the assessor's projects section, the `DSH_SUPERAGENT_PROJECT` variable, and one Ticket per project at a time |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |
@@ -502,7 +505,7 @@ Read caches use bounded in-memory `TextCache` instances and are lost on restart.
 
 Nothing deletes old records yet, so these grow without bound: the `trigger`, `disposition` and `decision` rows; ended Tickets and their Threads; the outbox's receipts; and in `kv`, every saved settings revision and prompt version, the prompt revisions each Session worked under, and the Sources' records per Thread and per Issue or pull request.
 
-`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of the pre-release schema 10 once, at start, and refuses an older one.
+`SCHEMA_VERSION` only increases. A database of a newer version refuses to start; `src/app/migration.ts` upgrades a database of schema 10–12 at start, and refuses an older one.
 
 ## Model-facing interfaces
 

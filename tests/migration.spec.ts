@@ -2,10 +2,10 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { SCHEMA_VERSION, Store } from '../src/app/store.ts'
 import { KV } from '../src/kv.ts'
-import { basisOf, reasonsOf, withoutCopies } from '../src/app/migration.ts'
+import { basisOf, moveProjectsOutOfExecutor, reasonsOf, withProjectName, withoutCopies } from '../src/app/migration.ts'
 import { Prompts, composePrompt, defaultPrompts } from '../src/app/prompts.ts'
 import { masterPrompt } from '../src/app/context.ts'
 
@@ -202,7 +202,7 @@ it('changes nothing when one step fails: the database stays at schema 10 as it w
     updatedAt: '2', mandate: mandate({ via: 'listed' }), meta: { sourceTriggerId: 'trig-1', workspace: '/w/fix-1' } }
   // The current settings must validate; an invalid value aborts the migration transaction.
   schema10(path, { settings: { executor: { maxWorkers: 'many' } } }, { ticket: [ticket] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: the settings: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 13 failed: the settings: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t1'").get()!.value))).toMatchObject({ meta: { workspace: '/w/fix-1' } })
@@ -475,7 +475,7 @@ it('names the ticket it stopped at when a ticket does not read, and leaves the d
   const path = join(directory, 'db.sqlite')
   const { inputs: _inputs, ...broken } = ticket10('t9')
   schema10(path, {}, { ticket: [broken] })
-  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 11 failed: ticket t9: /)
+  expect(() => new Store(path)).toThrow(/^The orchestrator database is unchanged at schema 10: its migration to schema 13 failed: ticket t9: /)
   const db = new DatabaseSync(path)
   expect(db.prepare("SELECT value FROM kv WHERE key='schema'").get()).toEqual({ value: '10' })
   expect(JSON.parse(String(db.prepare("SELECT value FROM ticket WHERE id='t9'").get()!.value))).toEqual(broken)
@@ -536,4 +536,59 @@ it('delivers the candidate of an Eval in progress at the upgrade again, so its d
   const effects = store.db.prepare("SELECT key, value FROM effect WHERE kind = 'assessment'").all().map(row => [row.key, JSON.parse(String(row.value))])
   expect(effects).toEqual([['e9', { triggerId: 'issue-9' }]])
   store.close()
+})
+
+it('moves the local project registry out of the executor block, keeping only a name, a directory and keywords', () => {
+  const moved = moveProjectsOutOfExecutor({
+    executor: { maxWorkers: 3, prepare: '', blockedCommands: [], matchFallback: 'stop',
+      projects: [{ id: 'a', name: 'A', path: 'D:\\a', keywords: ['x'], description: 'd', prepare: 'p', enabled: true },
+        { id: 'off', name: 'Off', path: 'D:\\off', enabled: false }] },
+  })
+  expect(moved.executor).toEqual({ maxWorkers: 3, prepare: '', blockedCommands: [] })
+  // A disabled project is dropped; the fallback moves with the registry.
+  expect(moved.projects).toEqual({ items: [{ name: 'A', path: 'D:\\a', keywords: ['x'] }], matchFallback: 'stop' })
+})
+
+it('leaves a registry that already has its own block alone, and adds nothing while the executor had no projects', () => {
+  const existing = { executor: {}, projects: { items: [{ name: 'Kept', path: 'D:\\k' }], matchFallback: 'directory' } }
+  expect(moveProjectsOutOfExecutor(existing)).toEqual(existing)
+  expect(moveProjectsOutOfExecutor({ executor: { maxWorkers: 2 } })).toEqual({ executor: { maxWorkers: 2 } })
+})
+
+it('gives a Ticket that still records execution.projectId its project name when the database is upgraded', () => {
+  const path = join(directory, 'db.sqlite')
+  const store = new Store(path)
+  store.set('settings', { projects: { items: [{ name: 'Demo Web', path: 'D:\\work\\demo-web', keywords: [] }], matchFallback: 'directory' } })
+  store.db.prepare('INSERT INTO ticket (id, value) VALUES (?, ?)').run('t1',
+    JSON.stringify({ id: 't1', execution: { name: 'n', directory: 'D:\\work\\demo-web', assignment: 'a', projectId: 'demo-web' } }))
+  store.set(KV.store.schema, 12)
+  store.close()
+  const reopened = new Store(path)
+  const row = reopened.db.prepare("SELECT value FROM ticket WHERE id = 't1'").get()
+  expect(JSON.parse(String(row!.value)).execution).toEqual({ name: 'n', directory: 'D:\\work\\demo-web', assignment: 'a', project: 'Demo Web' })
+  expect(reopened.get(KV.store.schema)).toBe(13)
+  reopened.close()
+})
+
+describe('withProjectName', () => {
+  const items = [{ name: 'Demo Web', path: 'D:\\work\\demo-web' }]
+  const ticket = (execution: Record<string, unknown>) => ({ id: 't1', execution })
+  it('names the project whose directory is the workspace, dropping the legacy id', () => {
+    expect(withProjectName(ticket({ name: 'n', directory: 'D:\\work\\demo-web', assignment: 'a', projectId: 'demo-web' }), items))
+      .toEqual(ticket({ name: 'n', directory: 'D:\\work\\demo-web', assignment: 'a', project: 'Demo Web' }))
+  })
+  it('ignores separator style, case and a trailing slash when matching the directory', () => {
+    expect(withProjectName(ticket({ name: 'n', directory: 'd:/WORK/demo-web/', assignment: 'a', projectId: 'demo-web' }), items))
+      .toEqual(ticket({ name: 'n', directory: 'd:/WORK/demo-web/', assignment: 'a', project: 'Demo Web' }))
+  })
+  it('keeps the old id as the name when the registry no longer holds that directory', () => {
+    expect(withProjectName(ticket({ name: 'n', directory: 'D:\\gone', assignment: 'a', projectId: 'gone' }), items))
+      .toEqual(ticket({ name: 'n', directory: 'D:\\gone', assignment: 'a', project: 'gone' }))
+  })
+  it('leaves a ticket that never recorded a project, or already has a name, untouched', () => {
+    const fallback = ticket({ name: 'n', directory: 'D:\\state\\work\\n', assignment: 'a' })
+    expect(withProjectName(fallback, items)).toBe(fallback)
+    const named = ticket({ name: 'n', directory: 'D:\\work\\demo-web', assignment: 'a', project: 'Already', projectId: 'x' })
+    expect(withProjectName(named, items)).toEqual(ticket({ name: 'n', directory: 'D:\\work\\demo-web', assignment: 'a', project: 'Already' }))
+  })
 })

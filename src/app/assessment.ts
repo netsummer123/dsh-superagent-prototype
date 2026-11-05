@@ -4,6 +4,7 @@ import { z } from 'zod'
 import { reasonText, threadKey, type Assessor, type AssessmentOutcome, type Candidate, type EngineForMainSession,
   type Trigger } from '../core/index.ts'
 import { AdmissionDirectionSchema, RuleAssessmentSchema, assessmentOutcome, directionAllowed, type Settings } from '../policy.ts'
+import { LIMITS } from '../limits.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { Commands } from '../infra/commands.ts'
 import type { Deployment } from '../deployment.ts'
@@ -26,8 +27,9 @@ export const AssessmentSchema = z.object({
   direction: AdmissionDirectionSchema.describe('Required for every decision.'),
   title: z.string().min(1).max(160),
   worktree_name: WorktreeNameSchema.optional(),
-  /** The local project id the task belongs to, chosen from the configured project list; omit when none matches. */
-  project: z.string().trim().max(64).regex(/^[a-z0-9][a-z0-9-]*$/).optional().describe('The configured project id this task belongs to, or omit when none matches.'),
+  /** The local project name the task belongs to, exactly as the Local projects list gives it; omit when none matches. */
+  project: z.string().trim().min(1).max(LIMITS.projectName).optional()
+    .describe('The exact name of the configured project this task belongs to, including spaces and capitals; omit when none matches.'),
   scope: z.string().max(1500),
   intent_evidence: z.string().trim().min(1).max(700).nullish().describe('For acceptance: the quotes that establish the three facts.'),
   acknowledgement: AcknowledgementSchema.nullish().describe('For acceptance: one sentence in the source language, posted as a reply to the trigger; omit only when a matched rule asks for silence.'),

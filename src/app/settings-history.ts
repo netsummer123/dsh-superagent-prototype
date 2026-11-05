@@ -10,6 +10,7 @@ export type SettingsChangeCode = 'ruleAdded' | 'ruleRenamed' | 'ruleInstruction'
   | 'sourceEnabled' | 'sourceDisabled' | 'sourceField' | 'sourceRowsAdded' | 'sourceRowsRemoved' | 'sourceRowsChanged' | 'sourceAdmission'
   | 'mode' | 'timeout' | 'evalModel' | 'executorModel' | 'maxWorkers' | 'paused' | 'resumed' | 'executionDirectory' | 'prepareCommand'
   | 'blockedCommands'
+  | 'projectAdded' | 'projectRemoved' | 'projectPath' | 'projectKeywords' | 'matchFallback'
 /** A single settings diff entry rendered by the panel using `change.<code>` and field labels from the Source listing. */
 export interface SettingsChange {
   code: SettingsChangeCode; items?: string[]; from?: string | number | boolean; to?: string | number | boolean; name?: string; source?: string
@@ -71,6 +72,15 @@ function settingsChanges(before: SettingsVersion['settings'], after: SettingsVer
   if (before.executor.directory !== after.executor.directory) changes.push({ code: 'executionDirectory', from: before.executor.directory, to: after.executor.directory })
   if (before.executor.prepare !== after.executor.prepare) changes.push({ code: 'prepareCommand' })
   if (!same(before.executor.blockedCommands, after.executor.blockedCommands)) changes.push({ code: 'blockedCommands', from: before.executor.blockedCommands.join(' '), to: after.executor.blockedCommands.join(' ') })
+  // The local project registry is summarized by name, so a directory or keyword edit still reads as one project change.
+  for (const project of after.projects.items) {
+    const previous = before.projects.items.find(item => item.name === project.name)
+    if (!previous) changes.push({ code: 'projectAdded', name: project.name })
+    else if (previous.path !== project.path) changes.push({ code: 'projectPath', name: project.name })
+    else if (previous.keywords.join('\n') !== project.keywords.join('\n')) changes.push({ code: 'projectKeywords', name: project.name })
+  }
+  for (const project of before.projects.items) if (!after.projects.items.some(item => item.name === project.name)) changes.push({ code: 'projectRemoved', name: project.name })
+  if (before.projects.matchFallback !== after.projects.matchFallback) changes.push({ code: 'matchFallback', from: before.projects.matchFallback, to: after.projects.matchFallback })
   for (const id of new Set([...Object.keys(before.sources), ...Object.keys(after.sources)])) changes.push(...sourceChanges(id, before.sources[id], after.sources[id], sources))
   return changes
 }

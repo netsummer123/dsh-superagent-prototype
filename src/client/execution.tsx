@@ -72,59 +72,14 @@ function EnvironmentVariables({ groups, sources,
     </div>
   </DisclosureRow>
 }
-/** One editable project row: fields are kept as raw text in the draft and parsed on save. */
-interface ProjectDraft { id: string; name: string; path: string; keywords: string; description: string; prepare: string; enabled: boolean }
-const emptyProject = (): ProjectDraft => ({ id: '', name: '', path: '', keywords: '', description: '', prepare: '', enabled: true })
-/** Turn a display name into a lowercase kebab-case id, used when the operator leaves the id blank. */
-const idFromName = (name: string): string => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 64)
-/**
- * The local project registry editor: add, edit, enable or remove projects an assessment may route a ticket to. Each project's
- * `path` becomes a worker's workspace, so it is the operator's decision which directories are listed here.
- */
-function ProjectsEditor({ projects, onChange }: { projects: ProjectDraft[]; onChange: (next: ProjectDraft[]) => void }) {
-  const { t } = usePanel()
-  const set = (index: number, patch: Partial<ProjectDraft>) => onChange(projects.map((project, i) => i === index ? { ...project, ...patch } : project))
-  return <div className="dt-projects">
-    {projects.length === 0 ? <Hint>{t('projectsNone')}</Hint> : <ul className="dt-list">
-      {projects.map((project, index) => <li key={index} className="dt-project-row">
-        <div className="dt-grid3">
-          <Field label={t('projectName')}><Input value={project.name}
-            onChange={event => set(index, { name: event.target.value, ...project.id ? {} : { id: idFromName(event.target.value) } })} /></Field>
-          <Field label={t('projectId')}><Input className="dt-mono" value={project.id} spellCheck={false}
-            onChange={event => set(index, { id: event.target.value.trim().toLowerCase() })} /></Field>
-          <Field label={t('projectEnabled')}><Switch checked={project.enabled} label={t('projectEnabled')}
-            onChange={next => set(index, { enabled: next })} /></Field>
-        </div>
-        <Field label={t('projectPath')} hint={t('projectPathHint')}><Input className="dt-mono" value={project.path} spellCheck={false}
-          placeholder={t('projectPathEmpty')} onChange={event => set(index, { path: event.target.value })} /></Field>
-        <Field label={t('projectKeywords')} hint={t('projectKeywordsHint')}><Input value={project.keywords}
-          placeholder={t('projectKeywordsEmpty')} onChange={event => set(index, { keywords: event.target.value })} /></Field>
-        <Field label={t('projectDescription')} hint={t('projectDescriptionHint')}><Input value={project.description}
-          onChange={event => set(index, { description: event.target.value })} /></Field>
-        <Field label={t('projectPrepare')} hint={t('projectPrepareHint')}><Input className="dt-mono" value={project.prepare}
-          spellCheck={false} placeholder={t('projectPrepareEmpty')} onChange={event => set(index, { prepare: event.target.value })} /></Field>
-        <button type="button" className="dt-textlink" onClick={() => onChange(projects.filter((_, i) => i !== index))}>
-          <Icon name="trash" size={14} /> {t('projectRemove')}
-        </button>
-      </li>)}
-    </ul>}
-    <button type="button" className="dt-textlink" onClick={() => onChange([...projects, emptyProject()])}>
-      <Icon name="plus" size={14} /> {t('projectAdd')}
-    </button>
-  </div>
-}
 export function ExecutionSettings() {
   const { t } = usePanel()
   const { blocks, environment, sources } = useSettings().settings
   // Keep raw user text (such as separators between blocked commands) in the draft and parse only on save.
   const executor = blocks.executor.value
-  const saved = { ...executor, maxWorkers: String(executor.maxWorkers), blockedCommands: executor.blockedCommands.join(' '),
-    projects: executor.projects.map(({ id, name, path, keywords, description, prepare, enabled }): ProjectDraft =>
-      ({ id, name, path, keywords: keywords.join(', '), description, prepare, enabled })) }
+  const saved = { ...executor, maxWorkers: String(executor.maxWorkers), blockedCommands: executor.blockedCommands.join(' ') }
   const draft = useBlockDraft('executor', saved, blocks.executor.revision, value => ({ ...value,
-    maxWorkers: numberOf(value.maxWorkers), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean),
-    projects: value.projects.map(({ id, name, path, keywords, description, prepare, enabled }) => ({ id: id.trim(), name: name.trim(), path: path.trim(),
-      keywords: keywords.split(/[,，\s]+/).map(word => word.trim()).filter(Boolean), description: description.trim(), prepare: prepare.trim(), enabled })) }))
+    maxWorkers: numberOf(value.maxWorkers), blockedCommands: value.blockedCommands.split(/[\s,]+/).filter(Boolean) }))
   const value = draft.value
   const edit = (next: Partial<typeof value>) => draft.edit({ ...value, ...next })
   const prepare = useRef<HTMLTextAreaElement>(null)
@@ -153,15 +108,6 @@ export function ExecutionSettings() {
             <Input className="dt-mono" value={value.directory} placeholder={t('executionDirectoryEmpty')} spellCheck={false} pattern="/.*"
               onChange={event => edit({ directory: event.target.value })} />
           </Field>
-          <Section title={t('projectsTitle')} hint={t('projectsIntro')}>
-            <ProjectsEditor projects={value.projects} onChange={projects => edit({ projects })} />
-            <Field label={t('matchFallback')} hint={t('matchFallbackHint')}>
-              <SegmentedControl label={t('matchFallback')} value={value.matchFallback}
-                options={[{ value: 'directory' as const, label: t('matchFallbackDirectory') },
-                  { value: 'stop' as const, label: t('matchFallbackStop') }]}
-                onChange={next => edit({ matchFallback: next })} />
-            </Field>
-          </Section>
           <Field label={t('prepareCommand')} hint={t('prepareCommandHint')}>
             <textarea ref={prepare} className="dt-textarea dt-mono" rows={3} maxLength={LIMITS.prepareCommand} spellCheck={false}
               placeholder={t('prepareCommandEmpty')} value={value.prepare}

@@ -131,6 +131,16 @@ it('asks the assessment only for decisions its tool accepts, which no longer inc
   expect(result('ignore', { ticket_id: 't' })).toBe(false)
 })
 
+it('accepts a project name exactly as the Local projects list gives it, spaces and capitals included', () => {
+  const direction = { implementation_requested: true, target_basis: 'specified', requires_design_decision: false, evidence: 'e' }
+  const result = (project?: string) => AssessmentSchema.safeParse({ decision: 'accept', rule_assessments: [], direction, title: 't',
+    scope: 's', reason: 'r', worktree_name: 'fix-label', ...project === undefined ? {} : { project } }).success
+  expect(result('Demo Web')).toBe(true)
+  expect(result('dsh-superagent')).toBe(true)
+  expect(result('')).toBe(false)
+  expect(result('x'.repeat(81))).toBe(false)
+})
+
 it('loads a window without the assessment instructions: the trigger once, cut messages with their length, and stubs for the rest',
   async () => {
   const bodies = Array.from({ length: 30 }, (_, i) => `comment ${i}: ${'the label reads oddly on the settings page. '.repeat(i % 4 === 0
