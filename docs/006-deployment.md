@@ -171,7 +171,9 @@ Setup must succeed before polling or work starts. Overview lists missing require
    ```
 
    List personal CLIs, such as one signed in to your own account, as blocked commands.
-4. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
+
+   **Local projects (optional).** When one installation serves several checkouts, list them under **Local projects**: a name, a lowercase kebab-case id, the project's absolute directory, optional match keywords and a description, an optional prepare command, and whether it is enabled. Each arriving request is then matched to at most one project by the assessor, which chooses by an explicit name or keyword first and by the description's meaning second, and the Ticket develops **in that project's directory in place** instead of under the directory root. The project's directory must already exist and is never created or removed; a missing one fails the Ticket with `The project directory is not usable`. Because a project's directory is shared, only one Ticket per project launches or runs at a time: a second one waits (rescheduled every few seconds) until the first starts finishing. **When no project matches**, the setting either falls back to the directory root (`Use the default ticket directory`) or does not start the ticket (`Do not start the ticket`), which fails it with a reason and waits for a person. Only list directories the agent may read and write.
+5. **Prompts.** Set the team sections: the GitHub disclosure line, review bots, the commit author and the auto-merge condition.
 
 ### Management API
 
@@ -219,7 +221,7 @@ The blocks:
 - `source:github`, `source:feishu`: `{"enabled": true, "config": {…}}`. GitHub's config has `repository` and `cli`, and the switches `observeIssues`, `observePulls`, `observeComments` and `observeCi`, off by default, which receive every new Issue, new pull request and comment in the repository and the default branch's CI; Feishu's has `cli`, `chats` as `[{"chatId": "oc_…", "name": "…", "listen": "mentions"}]` (or `"all"`), `directMessages`, and `otherChats` as `"none"` or `"mentions"`.
 - `policy`: `{"rules": […], "sources": {"github": {"allowed": [{"id": "<login>"}], "bots": [{"id": "dependabot[bot]"}]}, "feishu": {"allowed": [{"id": "ou_…", "name": "…"}], "syncChat": "oc_…", "admission": {"oc_…": {"unlistedAddressed": "explicit"}}}}}`. `bots` lists the bots whose messages may become inferred candidates. An `admission` row is keyed by chat id, `other` or `direct` for Feishu, and by `issues`, `pulls`, `comments` or `ci` for GitHub; an unset cell takes its default (see [002 Authorization](002-authorization.md)).
 - `eval`: `mode`, `timeoutSeconds` and `model`.
-- `executor`: `model`, `maxWorkers`, `directory`, `prepare` and `blockedCommands`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
+- `executor`: `model`, `maxWorkers`, `directory`, `prepare`, `blockedCommands`, `projects` and `matchFallback`. `projects` is the local project registry — `[{"id": "demo-web", "name": "Demo Web", "path": "/home/me/src/demo-web", "keywords": ["landing page"], "description": "…", "prepare": "", "enabled": true}]` — and `matchFallback` is `directory` or `stop`. The processing pause is a setting of its own, `paused`, which `POST executor/pause` sets.
 
 Changing a repository or CLI runs the corresponding setup check first. A failed check returns 400 with details in `setup`. A successful account change, or any save while setup is pending, returns `restarting: true`. The API is temporarily unavailable while the application restarts.
 

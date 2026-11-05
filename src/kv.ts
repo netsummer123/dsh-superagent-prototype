@@ -63,4 +63,14 @@ export const KV = {
   dingtalk: { chats: record<Record<string, boolean>>('dingtalk-chats'), history: family<string, [conversation: string]>('dingtalk-history:'),
     seen: family<string[], [thread: string]>('dingtalk-thread-seen:'), initialized: family<boolean, [thread: string]>('dingtalk-thread-initialized:'),
     sent: family<string[], [conversation: string]>('dingtalk-sent:') },
+  /**
+   * GitLab Source: per-project event cursor (Issues/MRs updated since), per-project Todo cursor, per-polled-thread seen note IDs
+   * and initialization flag, per-project default-branch pipeline baseline, and the per-project revision counter of reported CI
+   * changes. Projects are keyed by their slug (the project path with `/` written as `~`) so one Source watches several projects.
+   */
+  gitlab: { projectIds: record<Record<string, number>>('gitlab-project-ids'),
+    stream: family<{ since: string; started: Record<string, string> }, [project: string, stream: string]>('gitlab-stream:'),
+    todos: family<string, [project: string]>('gitlab-todos:'),
+    seen: family<string[], [thread: string]>('gitlab-thread-seen:'), initialized: family<boolean, [thread: string]>('gitlab-thread-initialized:'),
+    branchCi: family<{ branch?: string; failures?: string[]; revision: number }, [project: string]>('gitlab-branch-ci:') },
 }

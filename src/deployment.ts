@@ -53,18 +53,32 @@ export const GithubAccountsSchema = z.object({
 export const FeishuBotSchema = z.object({ cli: z.string().trim().default('') })
 /** DingTalk bot credentials: an enterprise internal app's AppKey and AppSecret, exchanged for an access token at setup and on demand. */
 export const DingtalkBotSchema = z.object({ appKey: z.string().trim().default(''), appSecret: z.string().trim().default('') })
+/**
+ * GitLab account: the self-hosted host (with its port, such as `git.example.com:9001`) and a `glab` CLI restricted to it. The
+ * project list lives in the Source configuration (one Source watches several projects), not here; setup resolves it.
+ */
+export const GitlabAccountSchema = z.object({
+  host: z.string().trim().regex(/^([A-Za-z0-9.-]+(:[0-9]+)?)?$/, 'host[:port]').default(''),
+  cli: z.string().trim().default(''),
+  configDir: z.string().trim().default(''),
+})
 /** Source configuration keys that affect deployment setup and trigger a restart when changed. */
 export const SETUP_FIELDS: Readonly<Record<string, readonly string[]>> = { github: Object.keys(GithubAccountsSchema.shape), feishu: Object.keys(FeishuBotSchema.shape),
-  dingtalk: Object.keys(DingtalkBotSchema.shape) }
+  dingtalk: Object.keys(DingtalkBotSchema.shape), gitlab: Object.keys(GitlabAccountSchema.shape) }
 
 export interface Deployment extends Machine {
   repository: string
   github: { cli: string; login: string; noreply: string }
   feishu?: FeishuBot
   dingtalk?: DingtalkBot
+  gitlab?: GitlabAccount
 }
 export interface FeishuBot { cli: string; appId: string; brand: 'feishu' | 'lark'; botId: string; name: string }
 export interface DingtalkBot { appKey: string; appSecret: string; robotCode: string; name: string }
+/** The GitLab host, the agent's account, and every project it verifiably may push to, as the Source's configuration names them. */
+export interface GitlabAccount { cli: string; host: string; login: string; commitEmail: string; projects: readonly GitlabProject[]; configDir?: string }
+/** One configured project: its human path, numeric id, and the default branch used for the CI baseline. */
+export interface GitlabProject { path: string; id: number; defaultBranch: string }
 
 /**
  * Resolve a command name or absolute path to an executable file, ignoring the worker shim directory.
@@ -87,15 +101,15 @@ export function executable(name: string, path: string, exclude?: string): string
   throw new Error(`${name} is not an executable file${isAbsolute(name) ? '' : ' on PATH'}`)
 }
 
-export type Probe = (argv: string[]) => Promise<string>
+export type Probe = (argv: string[], env?: Record<string, string>) => Promise<string>
 /** Run startup checks through DSH's worker subprocess service with worker shims removed from PATH so a `gh` wrapper reaches the real binary. */
 export function workerProbe(subprocess: SubprocessRuntime, stateDir: string, cwd: string, signal: AbortSignal): Probe {
   const path = withoutDirectory(process.env.PATH ?? '', workerBin(stateDir))
   const lifetime = AbortSignal.any([signal, AbortSignal.timeout(60_000)])
   // POSIX prefixes `PATH` with the `env` tool; Windows has no `env`, so the runtime receives the environment itself.
   return isWindows
-    ? argv => runAsWorker(subprocess, argv, cwd, lifetime, { ...stringEnvironment(), PATH: path })
-    : argv => runAsWorker(subprocess, ['env', `PATH=${path}`, ...argv], cwd, lifetime)
+    ? (argv, env) => runAsWorker(subprocess, argv, cwd, lifetime, { ...stringEnvironment(), PATH: path, ...env })
+    : (argv, env) => runAsWorker(subprocess, ['env', `PATH=${path}`, ...Object.entries(env ?? {}).map(([key, value]) => `${key}=${value}`), ...argv], cwd, lifetime)
 }
 
 const GithubUser = z.object({ login: z.string().regex(/^[A-Za-z0-9-]+$/), id: z.number().int().positive() })
@@ -190,3 +204,42 @@ export async function resolveDingtalkBot(machine: Machine, dingtalk: unknown, fe
   return { appKey, appSecret, robotCode, name }
 }
 const status = (code: number): string => `HTTP ${code}`
+
+const GitlabUser = z.object({ username: z.string().min(1), id: z.number().int().positive(), email: z.string().nullable().optional(), commit_email: z.string().nullable().optional() })
+const GitlabProjectInfo = z.object({
+  id: z.number().int().positive(), path_with_namespace: z.string().min(1), default_branch: z.string().nullable().optional(), archived: z.boolean().optional(),
+  permissions: z.object({ project_access: z.object({ access_level: z.number() }).nullable().optional(), group_access: z.object({ access_level: z.number() }).nullable().optional() }).loose().optional(),
+})
+/** The least GitLab access level that may push branches and open merge requests (Developer). */
+const GITLAB_PUSH_LEVEL = 30
+/** The `glab` argv prefix that selects one self-hosted host, so a CLI shared by hosts still talks to the configured one. */
+const glabHost = (host: string): Record<string, string> => ({ GITLAB_HOST: host })
+/**
+ * Verify a GitLab host and CLI by reading the agent's account, then resolve every configured project and its push access.
+ * Each failure names the project so an operator can fix one entry without guessing; a failure disables only the GitLab Source.
+ */
+export async function resolveGitlabProjects(machine: Machine, gitlab: unknown, projects: readonly { path: string }[], probe: Probe, path = process.env.PATH ?? ''): Promise<GitlabAccount | undefined> {
+  const { host, cli: name, configDir } = GitlabAccountSchema.parse(gitlab ?? {})
+  if (!host && !name) return undefined
+  if (!host) throw new SetupError('gitlabHostUnset')
+  if (!name) throw new SetupError('gitlabCliUnset')
+  let cli: string
+  try { cli = executable(name, path, workerBin(machine.stateDir)) } catch (error) { throw new SetupError('gitlabCliMissing', { output: reason(error) }) }
+  const env = { ...glabHost(host), ...(configDir ? { GLAB_CONFIG_DIR: configDir } : {}) }
+  const run = (args: string[]): Promise<string> => probe([cli, ...args], env).catch((error: unknown) => { throw new SetupError('gitlabCliFailed', { host, output: reason(error) }) })
+  const user = parsed(GitlabUser, await run(['api', 'user']))
+  if (!user) throw new SetupError('gitlabNoAccount', { host })
+  const commitEmail = user.commit_email || user.email || `${user.id}+${user.username}@users.noreply.${host.split(':')[0]!}`
+  const resolved: GitlabProject[] = []
+  for (const entry of projects) {
+    const project = entry.path
+    const info = parsed(GitlabProjectInfo, await run(['api', `projects/${encodeURIComponent(project)}`])
+      .catch((error: unknown) => { throw new SetupError('gitlabProjectUnreadable', { project, account: user.username, output: reason(error) }) }))
+    if (!info) throw new SetupError('gitlabProjectUnreadable', { project, account: user.username, output: 'the project API returned no readable project' })
+    if (info.archived) throw new SetupError('gitlabProjectArchived', { project })
+    const level = Math.max(info.permissions?.project_access?.access_level ?? 0, info.permissions?.group_access?.access_level ?? 0)
+    if (level < GITLAB_PUSH_LEVEL) throw new SetupError('gitlabProjectReadOnly', { project, account: user.username, level: String(level) })
+    resolved.push({ path: info.path_with_namespace, id: info.id, defaultBranch: info.default_branch || 'main' })
+  }
+  return { cli, host, login: user.username, commitEmail, projects: resolved, ...(configDir ? { configDir } : {}) }
+}

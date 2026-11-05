@@ -23,7 +23,7 @@ const SkillNameSchema = z.string().regex(SKILL_NAME).refine(name => !(Object.key
 /** The built-in parts a team may override, by key: both roles' parts, the Source skills, and the generated parts' templates. */
 const PART_KEYS = ['runtime/shared', 'runtime/orchestrator', 'runtime/worker', 'runtime/subscriptions', 'runtime/replies',
   'runtime/dispatch', 'runtime/work', 'runtime/admission', 'runtime/handoff/orchestrator', 'runtime/handoff/worker', 'runtime/environment',
-  'runtime/policy', 'runtime/policy/none', 'skill/feishu', 'skill/github', 'skill/dingtalk'] as const
+  'runtime/policy', 'runtime/policy/none', 'skill/feishu', 'skill/github', 'skill/dingtalk', 'skill/gitlab'] as const
 export type PartKey = typeof PART_KEYS[number]
 /** A team's text for a built-in part, and `base`, the key of the built-in text it was edited from. */
 const OverrideSchema = z.object({ text: z.string(),
@@ -68,6 +68,7 @@ export const builtInParts = (): Readonly<Record<PartKey, BuiltInPart>> => parts 
   'skill/feishu': { roles: BOTH, text: `${sourceSkills.feishu}\n\n## CLI usage\n${cliNotes}` },
   'skill/github': { roles: BOTH, text: `${sourceSkills.github}\n\n## CLI usage\n${cliNotes}` },
   'skill/dingtalk': { roles: BOTH, text: `${sourceSkills.dingtalk}\n\n## CLI usage\n${cliNotes}` },
+  'skill/gitlab': { roles: BOTH, text: `${sourceSkills.gitlab}\n\n## CLI usage\n${cliNotes}` },
 }
 /** The key of a built-in text, which an override's `base` records. */
 export const builtInBase = (text: string): string => key('prompt-built-in', text)
@@ -96,11 +97,32 @@ export function policySection(settings: Settings, config: PromptConfig = default
   const part = rules.length ? 'runtime/policy' : 'runtime/policy/none'
   return { key: part, text: fill(builtIn(config, part), { version: policyVersion(settings), mode: settings.eval.mode, rules: rules.join('\n') }) }
 }
+const PROJECTS_HEADING = '## Local projects\n'
+  + 'These local projects are configured on this installation. When you accept a task, set the assessment `project` field to the id of the '
+  + 'project whose directory the work belongs in, choosing by an explicit name or keyword in the task first, then by which project\'s description '
+  + 'best fits the task. Omit `project` only when no project clearly matches; the task then falls back to the default ticket directory. Never invent an id. '
+  + 'The `project` field only chooses the workspace directory: it does not change whether or how the request is accepted.'
+/**
+ * The main Session's project-routing section: the enabled local projects one per line (id, name, keywords, description), or nothing while
+ * no project is configured. Each field is flattened onto one line so a line reads as one project, never as a heading of its own.
+ */
+export function projectsSection(settings: Settings): string {
+  const line = (text: string) => text.replace(/\s*\n\s*/g, ' ').trim()
+  const projects = settings.executor.projects.filter(project => project.enabled)
+  if (!projects.length) return ''
+  const body = projects.map(({ id, name, keywords, description }) => {
+    const parts = [`- ${line(name)} (${id})`]
+    if (keywords.length) parts.push(`keywords: ${keywords.map(line).join(', ')}`)
+    if (description) parts.push(`description: ${line(description)}`)
+    return parts.join('; ')
+  })
+  return `${PROJECTS_HEADING}\n${body.join('\n')}`
+}
 /**
  * Assemble a role's system prompt sections in order from fixed templates, team sections, the generated execution environment
  * and, last, the main Session's generated Policy section, which nothing follows, and whose change leaves the rest unchanged.
  */
-export function promptParts(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }) {
+export function promptParts(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }, projects?: string) {
   // A built-in part names the key its text is overridden by, which for the handoff names the role.
   const fixed = (name: string, part = name) => ({ name, kind: 'fixed' as const, key: part, text: builtIn(config, part as PartKey) })
   const team = (name: TeamSection) => ({ name, kind: 'team' as const, heading: `## ${TEAM_HEADINGS[name]}`,
@@ -112,14 +134,15 @@ export function promptParts(config: PromptConfig, role: Role, environment?: stri
     ...role === 'orchestrator' ? [fixed('runtime/admission')] : [],
     fixed('runtime/handoff', `runtime/handoff/${role}`),
     ...environment ? [{ name: 'runtime/environment', kind: 'generated' as const, key: 'runtime/environment', text: environment }] : [],
+    ...role === 'orchestrator' && projects ? [{ name: 'runtime/projects', kind: 'generated' as const, key: 'runtime/projects', text: projects }] : [],
     ...role === 'orchestrator' && policy ? [{ name: 'runtime/policy', kind: 'generated' as const, ...policy }] : [],
   ].filter(part => part.text)
 }
-export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }): string {
-  return promptParts(config, role, environment, policy).map(part => part.text).join('\n\n')
+export function composePrompt(config: PromptConfig, role: Role, environment?: string, policy?: { key: string; text: string }, projects?: string): string {
+  return promptParts(config, role, environment, policy, projects).map(part => part.text).join('\n\n')
 }
 export function composeSkill(config: PromptConfig, name: string): string {
-  return name === 'feishu' || name === 'github' || name === 'dingtalk' ? builtIn(config, `skill/${name}`) : config.skills[name] ?? ''
+  return name === 'feishu' || name === 'github' || name === 'dingtalk' || name === 'gitlab' ? builtIn(config, `skill/${name}`) : config.skills[name] ?? ''
 }
 
 /** An override whose built-in text changed since its `base`, with that text when kept, or whose part this version no longer has. */
@@ -136,16 +159,17 @@ export class PromptConflict extends Error {}
 export class Prompts {
   private readonly versions: Versions<PromptVersion>
   constructor(private readonly store: Store, private readonly maxChars: () => number, private readonly environment: () => Variable[] | undefined,
-    private readonly feishu: () => boolean, private readonly dingtalk: () => boolean = () => false) {
+    private readonly feishu: () => boolean, private readonly dingtalk: () => boolean = () => false, private readonly gitlab: () => boolean = () => false) {
     this.versions = new Versions(store, KV.prompts.revision, KV.prompts.version)
   }
   /** A role's prompt; the main Session's Policy section follows the settings as they are now, at each model request. */
   compose(config: PromptConfig, role: Role, variables = this.environment()): string {
-    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined)
+    return composePrompt(config, role, environmentSection(config, variables), role === 'orchestrator' ? policySection(this.store.settings(), config) : undefined,
+      role === 'orchestrator' ? projectsSection(this.store.settings()) : undefined)
   }
   /** Returns skills to register in every Session: built-in Source skills (`feishu`/`dingtalk` only when that Source is configured) followed by team skills. */
   skills(config: PromptConfig): [string, string][] {
-    return [...this.feishu() ? ['feishu'] : [], ...this.dingtalk() ? ['dingtalk'] : [], 'github', ...Object.keys(config.skills)]
+    return [...this.feishu() ? ['feishu'] : [], ...this.dingtalk() ? ['dingtalk'] : [], ...this.gitlab() ? ['gitlab'] : [], 'github', ...Object.keys(config.skills)]
       .map(name => [name, composeSkill(config, name)])
   }
   current(): PromptVersion {
@@ -197,8 +221,9 @@ export class Prompts {
   preview(value: unknown) {
     const config = this.validate(value)
     const environment = environmentSection(config, this.environment()), policy = policySection(this.store.settings(), config)
-    return { orchestrator: composePrompt(config, 'orchestrator', environment, policy), worker: composePrompt(config, 'worker', environment),
-      parts: { orchestrator: promptParts(config, 'orchestrator', environment, policy), worker: promptParts(config, 'worker', environment) },
+    const projects = projectsSection(this.store.settings())
+    return { orchestrator: composePrompt(config, 'orchestrator', environment, policy, projects), worker: composePrompt(config, 'worker', environment),
+      parts: { orchestrator: promptParts(config, 'orchestrator', environment, policy, projects), worker: promptParts(config, 'worker', environment) },
       skills: Object.fromEntries(this.skills(config)), scope: 'Team sections, skills, and overrides of built-in parts, which follow their built-in text until overridden. Workers additionally inherit the host prompt and repository AGENTS.md. Prompt text changes what the agents are told, not what dsh-superagent allows: tool permissions, the gate and account wrappers stay.' }
   }
   save(value: unknown, baseRevision: number, source: SettingsOrigin): PromptVersion {

@@ -24,6 +24,8 @@ export interface SourceContextDeps {
   readonly feishuProblem?: SetupProblem | undefined
   /** Why setup found no working DingTalk app even though the DingTalk Source names credentials. */
   readonly dingtalkProblem?: SetupProblem | undefined
+  /** Why setup found no working GitLab account or project even though the GitLab Source names them. */
+  readonly gitlabProblem?: SetupProblem | undefined
   /** Hands a Trigger to the Engine and schedules the pass that assesses it. */
   receive(trigger: Trigger): ReceiveResult | Promise<ReceiveResult>
 }

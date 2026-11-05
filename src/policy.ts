@@ -30,7 +30,7 @@ export function directionAllowed(value: unknown): value is AdmissionDirection {
 }
 export interface Assessment {
   decision: 'accept' | 'ignore' | 'unavailable'; rule_assessments: RuleAssessment[]; direction: unknown
-  title: string; scope: string; reason: string; intent_evidence?: string | null; acknowledgement?: string | null; worktree_name?: string
+  title: string; scope: string; reason: string; intent_evidence?: string | null; acknowledgement?: string | null; worktree_name?: string; project?: string
 }
 /**
  * Validate an assessment against enabled rules and convert it into an engine `AssessmentOutcome`.
@@ -52,13 +52,13 @@ export function assessmentOutcome(assessment: Assessment, settings: Pick<Setting
   if (!directionAllowed(assessment.direction)) return { kind: 'ignore', audit, reason: { code: 'directionUnsettled' } }
   if (!matches.length) return { kind: 'ignore', audit, reason: { code: 'noRuleMatched' } }
   if (!assessment.intent_evidence) throw new Error('Acceptance requires intent_evidence')
-  const { title, scope, worktree_name: name } = assessment
+  const { title, scope, worktree_name: name, project } = assessment
   if (strength === 'inferred' && settings.eval.mode !== 'auto') {
-    const proposal = { title, scope, worktree_name: name }
+    const proposal = { title, scope, worktree_name: name, ...(project ? { project } : {}) }
     return { kind: 'ignore', audit: { ...audit, would_accept: true, proposal }, reason: { code: 'observed', values: { text: assessment.reason } } }
   }
   return { kind: 'accept', title, scope, reason: assessment.reason, ...(assessment.acknowledgement ? { acknowledgement: assessment.acknowledgement } : {}),
-    rules: matches.map(match => match.rule_id), audit, ...(name ? { name } : {}) }
+    rules: matches.map(match => match.rule_id), audit, ...(name ? { name } : {}), ...(project ? { project } : {}) }
 }
 const DEFAULT_RULES = [
   { id: 'copy', name: 'Copy fixes', enabled: true, instruction: 'Explicit requests to correct a typo, wording, punctuation or existing translation. Preserve product promises and business meaning.' },
@@ -88,13 +88,29 @@ export const EvalConfigSchema = z.object({
 }).strict()
 const CommandNameSchema = z.string().regex(/^[A-Za-z0-9._-]+$/).refine(name => name !== '.' && name !== '..', 'Not a command name')
   .refine(name => !WORKER_COMMANDS.includes(name), `${WORKER_COMMANDS.join(', ')} cannot be blocked`)
-/** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, and blocked commands. */
+/** A local project a ticket may be routed to: an absolute directory plus the metadata an assessment matches it by. */
+export const ProjectSchema = z.object({
+  id: z.string().trim().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, 'A lowercase kebab-case project id'),
+  name: z.string().trim().min(1).max(80),
+  path: z.string().trim().refine(path => ABSOLUTE_PATH.test(path), 'The project directory must be an absolute path'),
+  keywords: z.array(z.string().trim().min(1).max(60)).max(40).default([]),
+  description: z.string().trim().max(500).default(''),
+  /** An optional command run inside the project directory before the worker starts (such as fetching or checking out a branch). */
+  prepare: z.string().max(LIMITS.prepareCommand).default(''),
+  enabled: z.boolean().default(true),
+}).strict()
+export type Project = z.infer<typeof ProjectSchema>
+/** Executor settings: worker model, concurrency, ticket directory root (empty defaults to `<stateDir>/work`), `prepare` command, blocked commands, and the local project registry. */
 export const ExecutorConfigSchema = z.object({
   model: RoleModelSchema.nullable().default(null),
   maxWorkers: z.number().int().min(LIMITS.maxWorkers.min).max(LIMITS.maxWorkers.max).default(3),
   directory: z.string().trim().refine(path => path === '' || ABSOLUTE_PATH.test(path), 'An absolute path, or empty for <stateDir>/work').default(''),
   prepare: z.string().max(LIMITS.prepareCommand).default(''),
   blockedCommands: z.array(CommandNameSchema).default([]),
+  /** Local projects an assessment may route a ticket to; an empty list disables project matching and every ticket uses `directory`. */
+  projects: z.array(ProjectSchema).default([]),
+  /** What to do when a ticket matches no project: `auto` falls back to `directory`; `stop` refuses to launch it. */
+  matchFallback: z.enum(['directory', 'stop']).default('directory'),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
 export const SettingsSchema = z.object({

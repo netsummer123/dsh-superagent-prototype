@@ -183,7 +183,9 @@ export function TicketPage({ id }: { id: string }) {
         <InputList inputs={data.inputs.filter(input => input.delivered)} />
       </Details>}
       <Details icon="hash" title={t('identifiers')}>
-        <KeyValues rows={[[t('ticketId'), <span className="dt-mono">{data.id}</span>], [t('executionDirectory'), <span
+        <KeyValues rows={[[t('ticketId'), <span className="dt-mono">{data.id}</span>],
+          ...(data.project ? [[t('ticketProject'), <span className="dt-mono">{data.project}</span>] as [string, ReactNode]] : []),
+          [t('executionDirectory'), <span
           className="dt-mono">{data.directory ?? t('empty')}</span>],
           ...legacy && data.mandate.scope ? [[t('legacyAssignment'), <span
             className="dt-mono dt-clamp">{data.mandate.scope}</span>] as [string, ReactNode]] : []]} />

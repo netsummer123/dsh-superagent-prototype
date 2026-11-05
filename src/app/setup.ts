@@ -1,7 +1,8 @@
 /** Probes repository and account CLIs, configures the worker execution environment and command shims, and tracks setup readiness. */
 import type { Context } from '@deepseek-ai/cordis'
 import { UserError } from '../core/index.ts'
-import { SETUP_FIELDS, defaultFetcher, resolveDeployment, resolveDingtalkBot, resolveFeishuBot, workerProbe, type Deployment, type Fetcher, type Machine } from '../deployment.ts'
+import { SETUP_FIELDS, defaultFetcher, resolveDeployment, resolveDingtalkBot, resolveFeishuBot, resolveGitlabProjects, workerProbe, type Deployment, type Fetcher, type Machine } from '../deployment.ts'
+import { GitlabConfigSchema } from '../sources/gitlab.ts'
 import { agentVariables, applyEnvironment, verifyEnvironment, withoutDirectory, workerBin, writeEnvironment } from '../infra/environment.ts'
 import type { Settings, SettingsBlock } from '../policy.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
@@ -28,6 +29,7 @@ export class Setup {
   problem?: SetupProblem
   feishuProblem?: SetupProblem
   dingtalkProblem?: SetupProblem
+  gitlabProblem?: SetupProblem
   /** PATH with the worker shim directory removed so the host's own CLI calls invoke the real binaries. */
   private readonly path: string
   /** Environment variables pointing agent subprocesses at the isolated git config and command shims. */
@@ -55,7 +57,7 @@ export class Setup {
   }
   /** Trigger a restart to re-run setup, refusing if setup and Feishu are already healthy so running assignments are not interrupted. */
   check(): void {
-    if (this.configured() && !this.feishuProblem && !this.dingtalkProblem) throw new UserError('setupComplete')
+    if (this.configured() && !this.feishuProblem && !this.dingtalkProblem && !this.gitlabProblem) throw new UserError('setupComplete')
     this.restart()
   }
   /** Defer the restart to the next macrotask so the current HTTP or tool caller receives its response first. */
@@ -65,7 +67,9 @@ export class Setup {
     const { machine } = this.host
     const check = block === 'source:feishu' ? resolveFeishuBot(machine, settings.sources.feishu?.config, this.probe())
       : block === 'source:dingtalk' ? resolveDingtalkBot(machine, settings.sources.dingtalk?.config, this.fetcher())
-        : resolveDeployment(machine, settings.sources.github?.config, this.probe())
+        : block === 'source:gitlab' ? resolveGitlabProjects(machine, settings.sources.gitlab?.config,
+          GitlabConfigSchema.parse(settings.sources.gitlab?.config ?? {}).projects, this.probe())
+          : resolveDeployment(machine, settings.sources.github?.config, this.probe())
     await check.catch((error: unknown) => { if (!(error instanceof SetupError) || error.place === block.slice(7)) throw error })
   }
   async blockCommands(blocked: readonly string[]): Promise<void> {
@@ -95,7 +99,16 @@ export class Setup {
       context.logger.warn('dsh-superagent leaves DingTalk out: %s', error.message)
       return undefined
     })
-    const resolved = { ...deployment, ...(feishu ? { feishu } : {}), ...(dingtalk ? { dingtalk } : {}) }
+    // The GitLab projects live in the Source configuration; setup resolves them so the Source knows each project's numeric id and
+    // default branch, and a failure disables only GitLab.
+    const gitlabConfig = GitlabConfigSchema.parse(settings.sources.gitlab?.config ?? {})
+    const gitlab = await resolveGitlabProjects(machine, settings.sources.gitlab?.config, gitlabConfig.projects, probe).catch((error: unknown) => {
+      if (!(error instanceof SetupError)) throw error
+      this.gitlabProblem = error.problem
+      context.logger.warn('dsh-superagent leaves GitLab out: %s', error.message)
+      return undefined
+    })
+    const resolved = { ...deployment, ...(feishu ? { feishu } : {}), ...(dingtalk ? { dingtalk } : {}), ...(gitlab ? { gitlab } : {}) }
     const machineProblem = (error: unknown): never => {
       if (error instanceof SetupError) throw error
       throw new SetupError('environmentFailed', { output: error instanceof Error ? error.message : String(error) })

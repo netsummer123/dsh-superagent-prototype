@@ -200,6 +200,10 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 
 `prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: short name, directory and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id.
 
+`ticketExecution` decides the workspace: a Ticket whose assessment named an enabled local project gets that project's own directory (developed in place) and records `execution.projectId`; any other Ticket gets `<directory root>/<name>-<id>`, as before. A project id the settings no longer hold — an unknown, renamed or disabled one — falls back silently, so a model's mistake never sends work into the wrong directory. `prepareDirectory` treats the two cases apart: a project directory must already exist and is never created or removed (only verified, then the project's own `prepare` command runs inside it), while a ticket directory is created under the root and its root-level `prepare` runs in the parent, as before.
+
+Because a project directory is shared, `projectOccupied` keeps one Ticket per project in flight: `launchQueued` raises `Later` while another Ticket of the same project is launching (`projectStarting`) or running, and the `launch` effect reschedules it. The `matchFallback` setting decides what happens when nothing matched: `directory` uses the root, and `stop` refuses to start the Ticket, which fails with a reason and waits for a person.
+
 `WorkerSlots` reserves capacity before a launch or a delivery that wakes an idle worker. A human message can use one slot beyond `maxWorkers`, and wakes have priority over launches. `activeCount` supplies panel load.
 
 Transient provider and network failures get three retries. Launches use effect backoff; failed turns receive continuation messages after 15, 30 and 60 seconds. `inputMessage` renders each Input from current Ticket state, and `mandateInstructions` adds the matched-rule limits for inferred work.
@@ -326,7 +330,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
 | `src/app/settings.ts` | Settings |
 | `src/app/settings-history.ts` | `policyHistory`: each saved settings revision with what it changed from the one before |
-| `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, and `promptParts`, the order of a role's prompt sections |
+| `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, `promptParts`, the order of a role's prompt sections, and `projectsSection`, the local projects an assessment routes a Ticket by |
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
 | `src/app/sessions.ts` | Sessions |
@@ -334,7 +338,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/retry-health.ts` | `RetryHealth`: which Sessions wait on a model budget retry, for the `models` health entry |
 | `src/app/role-models.ts` | Resolves the Eval and Executor models, and seeds a new Session with its role's model |
 | `src/app/assessment.ts` | The MasterAssessor, the assessment schema and the window `orchestrator_eval` answers |
-| `src/app/execution-environment.ts` | The execution environment: its variables, a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
+| `src/app/execution-environment.ts` | The execution environment: its variables (including `DSH_SUPERAGENT_PROJECT`), a Ticket's values, the directory root and the lines of the prompt section, which `src/app/prompts.ts` fills into its template |
 | `src/app/source-context.ts` | `sourceContextOf`: each Source kind's `SourceContext` |
 | `src/app/links.ts` | `sourceLink`, the page of a Trigger's message, and `candidateCard` |
 | `src/app/cards.ts` | Compact cards of Triggers, Tickets, Threads and Decisions for models, the closed set of ticket card states `TICKET_STATES`, and `textPage` |
@@ -380,6 +384,11 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/dingtalk-loops.ts` | The DingTalk loops: the Stream consumer, optional history backfill, conversation names, and polling of subscribed threads |
 | `src/sources/dingtalk-channel.ts` | The DingTalk Channel: session-webhook and robot-API replies, `sent` or `gone`, and chat links |
 | `src/sources/dingtalk-read.ts` | The `dingtalk/` reads of a Trigger's conversation window and the message it threads under or answers, and `dingtalkThreadContext` for assessments |
+| `src/sources/gitlab.ts` | The GitLab kind and plugin entry, exported as `./gitlab-watch`: per-project Issue, merge-request and default-branch pipeline polling, subscribed Threads, and the plugin entry |
+| `src/sources/gitlab-trigger.ts` | GitLab issues, merge requests, notes and pipelines as Triggers, and GitLab addresses and project slugs |
+| `src/sources/gitlab-pull.ts` | The merge-request rules: which merge requests a Ticket follows, the closes it reports to the Engine, and the end notices |
+| `src/sources/gitlab-channel.ts` | The GitLab Channel: notes and discussion replies, `sent` or `gone`, with a hidden marker for idempotency |
+| `src/sources/gitlab-read.ts` | The `gitlab/` reads of a Trigger's notes and a merge request's pipeline, and `gitlabThreadContext` for assessments |
 | `src/client/index.tsx` | The client plugin entry: the sidebar entry, the main panel and the page in DeepSeek Harness's Plugin Manager |
 | `src/client/app.tsx` | The panel: header, search, glossary, tabs and the page of the current route |
 | `src/client/provider.tsx` | What every page reads from its host: copy, calls, navigation, notices, the state poll, and `restart`, which reads the state quickly while dsh-superagent restarts |
@@ -417,6 +426,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/commands.spec.ts` | CLI calls as the deployment's accounts, the Channels' answers, and repository-scoped GitHub calls |
 | `tests/feishu-read.spec.ts`, `tests/github-read.spec.ts` | Feishu and GitHub reads |
 | `tests/dingtalk.spec.ts` | The DingTalk Source on a `SourceContext`: translation, the Stream consumer, scope, the Channel's `sent`/`gone`, the Source\'s Policy part and admission rows |
+| `tests/gitlab.spec.ts` | The GitLab Source on a `SourceContext`: note, issue and merge-request translation, one project per Thread, scope, the Channel\'s `sent`/`gone` and idempotency, the per-project Policy rows, and a poll round |
 | `tests/admission-context.spec.ts`, `tests/feishu-image.spec.ts` | The Thread window of assessments, and Feishu image reads |
 | `tests/assessment.spec.ts` | What the MasterAssessor keeps per Eval, and when it lets go |
 | `tests/background.spec.ts` | Waiting for a worker's shell jobs and subagents: an end that woke it, and a host that stops |
@@ -441,6 +451,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/migration.spec.ts` | The schema 11 migration: every stored record in its current shape, and the refusal of older schemas |
 | `tests/store.spec.ts` | Repositories and their working sets, in SQLite as in memory, the kv area, with every key of `KV` spelled only in `src/kv.ts` and the migration, settings history and queries |
 | `tests/prompts.spec.ts` | Prompt validation, assembly and versions |
+| `tests/projects.spec.ts` | Project routing: `ticketExecution` choosing a project's directory or falling back, the assessor's projects section, and the `DSH_SUPERAGENT_PROJECT` variable |
 | `tests/cards.spec.ts` | The rules the built-in text must state, file by file |
 | `tests/model-surface.spec.ts` | Everything models read: tools, prompts, skills and inputs, checked against the tool schemas, the execution environment and the glossary, within a size budget per role |
 | `tests/deployment.spec.ts`, `tests/environment.spec.ts`, `tests/index.spec.ts` | The plugin configuration and setup, the agent's process environment, the plugin entry |

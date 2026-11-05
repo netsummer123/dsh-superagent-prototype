@@ -1,7 +1,7 @@
 /** Structured startup and configuration errors with the settings location where the operator can fix them. */
 import { fill } from './infra/text.ts'
 
-export type SetupPlace = 'deployment' | 'github' | 'feishu' | 'dingtalk'
+export type SetupPlace = 'deployment' | 'github' | 'feishu' | 'dingtalk' | 'gitlab'
 export const SETUP_PROBLEMS = {
   foreignFile: ['deployment', '{file} was not written by dsh-superagent; move it, or choose another state directory.'],
   gitTooOld: ['deployment', 'git does not read the github.com credential configuration dsh-superagent writes; dsh-superagent needs git 2.32 or later.'],
@@ -23,6 +23,14 @@ export const SETUP_PROBLEMS = {
   dingtalkAppSecretUnset: ['dingtalk', 'The DingTalk Source names an AppKey but no AppSecret.'],
   dingtalkCliFailed: ['dingtalk', 'The DingTalk app could not obtain an access token; check the AppKey and AppSecret.'],
   dingtalkRobotUnreported: ['dingtalk', 'The DingTalk robot API did not return the robot\'s name and code.'],
+  gitlabHostUnset: ['gitlab', 'The GitLab Source names a CLI but no host.'],
+  gitlabCliUnset: ['gitlab', 'The GitLab Source names a host but no glab CLI.'],
+  gitlabCliMissing: ['gitlab', 'The agent glab CLI was not found.'],
+  gitlabCliFailed: ['gitlab', 'The glab CLI cannot reach {host}.'],
+  gitlabNoAccount: ['gitlab', 'The glab CLI did not report an account on {host}.'],
+  gitlabProjectUnreadable: ['gitlab', '@{account} cannot read the GitLab project {project}.'],
+  gitlabProjectArchived: ['gitlab', 'The GitLab project {project} is archived.'],
+  gitlabProjectReadOnly: ['gitlab', '@{account} cannot push to {project} (access level {level}; Developer is required).'],
 } as const satisfies Record<string, readonly [SetupPlace, string]>
 export type SetupCode = keyof typeof SETUP_PROBLEMS
 export interface SetupProblem { place: SetupPlace; code: SetupCode; values: Record<string, string>; detail: string }

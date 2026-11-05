@@ -26,6 +26,8 @@ export const AssessmentSchema = z.object({
   direction: AdmissionDirectionSchema.describe('Required for every decision.'),
   title: z.string().min(1).max(160),
   worktree_name: WorktreeNameSchema.optional(),
+  /** The local project id the task belongs to, chosen from the configured project list; omit when none matches. */
+  project: z.string().trim().max(64).regex(/^[a-z0-9][a-z0-9-]*$/).optional().describe('The configured project id this task belongs to, or omit when none matches.'),
   scope: z.string().max(1500),
   intent_evidence: z.string().trim().min(1).max(700).nullish().describe('For acceptance: the quotes that establish the three facts.'),
   acknowledgement: AcknowledgementSchema.nullish().describe('For acceptance: one sentence in the source language, posted as a reply to the trigger; omit only when a matched rule asks for silence.'),

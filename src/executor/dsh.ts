@@ -55,6 +55,17 @@ export function transient(error: unknown): boolean {
 }
 /** Appends a stable 12-character ticket ID suffix to a validated English worktree name. */
 const ticketWorktreeName = (name: string, id: string): string => `${WorktreeNameSchema.parse(name)}-${id.slice(0, 12)}`
+/**
+ * Whether `projectId` is occupied by another ticket, so `ticketId` must wait before launching: another ticket for the same
+ * project is either mid-launch (`starting`, a project id to ticket id map) or running (per `isRunning`). A project ticket
+ * develops in one shared directory, so only one ticket per project may proceed at a time. Pure, so it is tested directly.
+ */
+export function projectOccupied(projectId: string, ticketId: string, starting: ReadonlyMap<string, string>,
+  open: readonly Ticket[], isRunning: (ticket: Ticket) => boolean): boolean {
+  const launching = starting.get(projectId)
+  if (launching && launching !== ticketId) return true
+  return open.some(ticket => ticket.id !== ticketId && ticket.execution?.projectId === projectId && isRunning(ticket))
+}
 /** Host dependencies used by `DshExecutor`. */
 export interface ExecutorHost {
   /** DSH Cordis context: agents and their events, and the subprocess service used to run prepare commands. */
@@ -107,7 +118,11 @@ export function ticketExecution(ticket: Ticket, outcome: Extract<AssessmentOutco
   const assignment = ticket.mandate.strength === 'inferred' && ruleIds
     ? `Proactively accepted under ${ruleIds.join(', ')}. Scope: ${outcome.scope}.${precedence}${note}`
     : note.trim()
-  return { name, directory: join(executionRoot(settings, stateDir), name), assignment }
+  // A matched, enabled project makes the project's own directory the workspace (developing in place); otherwise the ticket
+  // gets its own directory under the execution root, as before. A project id the settings do not hold falls back, never throws.
+  const project = outcome.project ? settings.executor.projects.find(item => item.id === outcome.project && item.enabled) : undefined
+  const directory = project ? project.path : join(executionRoot(settings, stateDir), name)
+  return { name, directory, assignment, ...(project ? { projectId: project.id } : {}) }
 }
 /** Character limits for inline assignment and trigger text in worker messages; longer text is read via its resource. */
 const ASSIGNMENT_CHARS = 1500, TRIGGER_CHARS = 600
@@ -222,6 +237,12 @@ export class DshExecutor implements Executor {
   private readonly left = new Map<string, { jobs: Set<string>; collect: AbortController }>()
   /** When a person's message typed into a worker's Session last started a turn, by ticket. */
   private readonly personal = new Map<string, string>()
+  /**
+   * Tickets in the middle of a launch, by project id. A project ticket develops in place in one shared directory, so at most
+   * one ticket per project may launch or run at a time; this holds the launch slot from reservation until the worker starts or
+   * the launch ends, so a second ticket for the same project waits instead of writing to the directory concurrently.
+   */
+  private readonly projectStarting = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
@@ -246,11 +267,24 @@ export class DshExecutor implements Executor {
    */
   private async prepareDirectory(ticket: Ticket): Promise<void> {
     const directory = ticket.execution?.directory ?? ''
-    await mkdir(dirname(directory), { recursive: true })
-    const command = this.host.store.settings().executor.prepare.trim()
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
     // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
     const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
+    // A ticket routed to a project develops in that project's existing directory: never create or remove it, only verify it is
+    // usable and run the project's optional prepare command inside it. A missing directory fails instead of being made, so a
+    // mistyped project path never turns into an empty workspace the worker mistakes for the project.
+    if (ticket.execution?.projectId) {
+      const project = this.host.store.settings().executor.projects.find(item => item.id === ticket.execution?.projectId)
+      await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime).catch((error: unknown) => {
+        throw new PrepareFailed(`The project directory is not usable: ${error instanceof Error ? error.message : String(error)}`)
+      })
+      const command = (project?.prepare ?? '').trim()
+      if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], directory, signal, env)
+        .catch((error: unknown) => { throw new PrepareFailed(`The project prepare command failed: ${error instanceof Error ? error.message : String(error)}`) })
+      return
+    }
+    await mkdir(dirname(directory), { recursive: true })
+    const command = this.host.store.settings().executor.prepare.trim()
     if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
       .catch(async (error: unknown) => {
         // Remove an empty directory left by a failed prepare command so a later retry does not treat it as already prepared.
@@ -271,7 +305,12 @@ export class DshExecutor implements Executor {
     const ticket = this.host.store.tickets.get(ticketId)
     const assignment = ticket && latestAssignment(ticket)
     if (!ticket || !liveTicket(ticket) || assignment?.id !== assignmentId || assignment.state !== 'pending') return
+    // A project ticket develops in place, so only one ticket per project may launch or run at a time. While another ticket for
+    // this project is launching or running, this launch waits (a `Later` reschedules it) rather than write to the same directory.
+    const project = ticket.execution?.projectId
+    if (project && this.projectBusy(project, ticketId)) throw new Later(`Project ${project} is busy with another ticket`)
     this.slots.reserve(ticketId, 'launch')
+    if (project) this.projectStarting.set(project, ticketId)
     try { await this.launch(ticket, assignment); this.transient.delete(`launch:${assignmentId}`) }
     catch (error) {
       // Shutdown or pause re-queues the launch for resume, and transient network/provider errors retry with backoff.
@@ -281,7 +320,15 @@ export class DshExecutor implements Executor {
       if (this.host.closing() || error instanceof Later) throw error
       if (!(error instanceof PrepareFailed) && this.retries(`launch:${assignmentId}`, error)) throw error
       this.launchFailed(ticketId, assignmentId, error)
-    } finally { this.slots.free(ticketId) }
+    } finally {
+      this.slots.free(ticketId)
+      if (project && this.projectStarting.get(project) === ticketId) this.projectStarting.delete(project)
+    }
+  }
+  /** Whether a project is occupied by another ticket that is launching or running, so `ticketId` must wait its turn. */
+  private projectBusy(projectId: string, ticketId: string): boolean {
+    return projectOccupied(projectId, ticketId, this.projectStarting,
+      this.host.store.tickets.open(), ticket => this.running(ticket))
   }
   /**
    * Delivers queued inputs to a running assignment one by one, re-reading ticket state before each delivery so delivery
@@ -431,8 +478,14 @@ export class DshExecutor implements Executor {
     const source = sourceTrigger(this.host, ticket)
     const workspace = ticket.execution?.directory ?? ''
     if (!current()) return
-    // Prepare the workspace directory once; an existing directory counts as already prepared, including worktrees created before `prepare` commands existed.
-    if (!await stat(workspace).then(() => true, () => false)) {
+    // A ticket routed to no project while the settings say to stop instead of falling back must not start.
+    const settings = this.host.store.settings()
+    if (settings.executor.matchFallback === 'stop' && settings.executor.projects.length && !ticket.execution?.projectId) {
+      throw new PrepareFailed('No local project matched this ticket, and the fallback is set to not start it')
+    }
+    // A project ticket develops in an existing directory, so prepare (verify + the project prepare command) must run even though
+    // the directory already exists. Otherwise prepare runs once, only while the ticket's own directory does not yet exist.
+    if (ticket.execution?.projectId || !await stat(workspace).then(() => true, () => false)) {
       await this.prepareDirectory(ticket)
       if (!current()) return
     }

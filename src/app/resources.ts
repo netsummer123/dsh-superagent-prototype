@@ -9,6 +9,8 @@ import { feishuTriggerId } from '../sources/feishu-trigger.ts'
 import { dingtalkRef } from '../sources/dingtalk-trigger.ts'
 import { dingtalkTriggerId } from '../sources/dingtalk-trigger.ts'
 import { dingtalkRead } from '../sources/dingtalk-read.ts'
+import { gitlabRef } from '../sources/gitlab-trigger.ts'
+import { gitlabRead } from '../sources/gitlab-read.ts'
 import { ASSIGNMENTS, INPUTS, assignmentLine, decisionCard, decisionDetails, inputLine, newestPage, preview, textPage, threadCard, ticketCard,
   ticketDetails, triggerCard, type TicketThread } from './cards.ts'
 import { threadTitle } from './views/records.ts'
@@ -55,6 +57,7 @@ export const RESOURCES: readonly { name: string; holds: string; executor?: true 
   { name: 'models/<provider>', holds: 'one provider\'s models' },
   { name: 'feishu/<trigger-id>/…', holds: 'a Feishu original, as the dsh-superagent-feishu skill describes', executor: true },
   { name: 'dingtalk/<trigger-id>/…', holds: 'a DingTalk original: its thread window, or the message it threads under or answers', executor: true },
+  { name: 'gitlab/<trigger-id>/…', holds: 'a GitLab original: a page of its issue or merge request notes', executor: true },
   { name: 'github/…', holds: 'a GitHub original, as the dsh-superagent-github skill describes', executor: true },
 ]
 export const resourceGrammar = (executor: boolean): string => RESOURCES.filter(resource => !executor || resource.executor)
@@ -130,6 +133,12 @@ function sourceContextRefs(trigger: Trigger): { refs?: Record<string, string>; r
     const parent = typeof trigger.meta.parentId === 'string' ? dingtalkTriggerId(trigger.meta.parentId) : undefined
     const read = (section: string) => `dingtalk/${ref.triggerId}/${section}`
     return { refs: { thread: read('thread'), root: read('root'), parent: read('parent') }, ...parent ? { repliedTo: parent } : {} }
+  }
+  if (trigger.source === 'gitlab') {
+    const ref = gitlabRef(trigger)
+    if (!ref) return {}
+    const read = (section: string) => `gitlab/${ref.triggerId}/${section}`
+    return { refs: { notes: read('notes') } }
   }
   return {}
 }
@@ -263,6 +272,13 @@ const ROUTES: readonly Route[] = [
     const section = read.rest.split('/')[1] ?? 'thread'
     const part = section === 'message' || section === 'root' || section === 'parent' || section === 'thread' ? section : 'thread'
     return sourcePage(read, 'dingtalk', () => dingtalkRead(read.host.commands.withSignal(read.signal), source, part === 'message' ? 'root' : part, read.host.feishuPageSize()))
+  }],
+  ['gitlab/', async read => {
+    const source = trigger(read.host, read.rest.split('/')[0]!, read.ticketId)
+    const ref = gitlabRef(source)
+    if (!ref) throw new Error('A GitLab source trigger is required')
+    const section = read.rest.split('/')[1] ?? 'notes'
+    return sourcePage(read, 'gitlab', () => gitlabRead(read.host.commands.withSignal(read.signal), ref, section, read.host.feishuPageSize()))
   }],
   ['ticket/', async read => {
     const { host, resource, rest, ticketId, signal } = read

@@ -4,6 +4,7 @@ import { basename } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import { defaultFetcher, type Deployment, type Fetcher } from '../deployment.ts'
+import { sameName } from './text.ts'
 
 const exec = promisify(execFile)
 const TIMEOUT_MS = 90_000
@@ -72,10 +73,10 @@ export class Commands {
     next.fetcher = this.fetcher
     return next
   }
-  async run(program: string, args: string[], cwd?: string): Promise<string> {
+  async run(program: string, args: string[], cwd?: string, extraEnv?: Record<string, string>): Promise<string> {
     try {
       const { stdout } = await exec(program, args, { cwd, signal: this.signal, timeout: TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024,
-        env: { ...process.env, ...this.environment, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
+        env: { ...process.env, ...this.environment, ...extraEnv, GH_PROMPT_DISABLED: '1', LARKSUITE_CLI_NO_UPDATE_NOTIFIER: '1', LARKSUITE_CLI_NO_SKILLS_NOTIFIER: '1' } })
       return stdout
     } catch (error) { throw commandError(error, program) }
   }
@@ -119,6 +120,59 @@ export class Commands {
   }
   /** Runs `git` on PATH using the agent's isolated git environment and credential helper. */
   async git(args: string[], cwd: string): Promise<string> { return this.run('git', args, cwd) }
+  /**
+   * Runs the agent's `glab` CLI against the configured GitLab host and parses its JSON output. The host travels in `GITLAB_HOST`
+   * because `glab --hostname` must follow `api` and rejects a `host:port`, while the environment variable accepts it anywhere.
+   * @throws CliError carrying GitLab's HTTP status as `code` on failure.
+   */
+  async glab<T>(args: string[]): Promise<T> {
+    return JSON.parse(await this.run(this.gitlabCli(), args, undefined, this.gitlabEnv())) as T
+  }
+  /**
+   * Calls the GitLab API v4 on a path within a configured project. Paths are relative to the project's API root (`issues`,
+   * `merge_requests/12/notes`, …); a path already rooted at that project is accepted too. Anything naming another project is
+   * refused, so a caller cannot reach beyond the projects the operator configured.
+   * @param request - optional method and JSON body, for a write (GitLab takes writes as form fields, sent here as `-f key=value`).
+   * @throws CliError carrying GitLab's HTTP status as `code` on failure.
+   */
+  async gitlabApi<T = unknown>(project: string, path: string, request?: { method: 'POST' | 'PUT'; body: Record<string, unknown> }): Promise<T> {
+    const root = this.gitlabRoot(project)
+    const full = path === '' ? root : path.startsWith('projects/') ? path : `${root}/${path.replace(/^\/+/, '')}`
+    if (full !== root && !full.startsWith(`${root}/`) && !full.startsWith(`${root}?`)) throw new Error('GitLab calls are restricted to the configured project')
+    const flags = request ? ['--method', request.method, ...Object.entries(request.body).flatMap(([key, value]) => ['-f', `${key}=${String(value)}`])] : []
+    return JSON.parse(await this.run(this.gitlabCli(), ['api', ...flags, full], undefined, this.gitlabEnv())) as T
+  }
+  /** Fetches a GitLab list by page (GitLab caps `per_page` at 100), following `X-Next-Page` until it is empty. */
+  async gitlabPages<T>(project: string, path: string, perPage = 100): Promise<unknown[]> {
+    const separator = path.includes('?') ? '&' : '?'
+    const items: unknown[] = []
+    for (let page = 1; page <= 100; page++) {
+      const batch = await this.gitlabApi<unknown>(project, `${path}${separator}page=${page}&per_page=${perPage}`)
+      if (!Array.isArray(batch)) throw new Error('A paginated GitLab read returned a non-list')
+      items.push(...batch)
+      if (batch.length < perPage) break
+    }
+    return items
+  }
+  /** The glab CLI of the configured GitLab host, or a clear error when the Source names none. */
+  private gitlabCli(): string {
+    const gitlab = this.deployment.gitlab
+    if (!gitlab) throw new Error('The GitLab Source has no working glab CLI')
+    return gitlab.cli
+  }
+  /** The environment a glab call runs with: `GITLAB_HOST` pins the configured host (with its port), and an optional config dir isolates its credentials. */
+  private gitlabEnv(): Record<string, string> {
+    const gitlab = this.deployment.gitlab
+    if (!gitlab) throw new Error('The GitLab Source has no working glab CLI')
+    return { GITLAB_HOST: gitlab.host, ...(gitlab.configDir ? { GLAB_CONFIG_DIR: gitlab.configDir } : {}) }
+  }
+  /** The API root of a configured project, refusing one the operator did not configure. */
+  private gitlabRoot(project: string): string {
+    const gitlab = this.deployment.gitlab
+    if (!gitlab) throw new Error('The GitLab Source has no working glab CLI')
+    if (!gitlab.projects.some(item => sameName(item.path, project))) throw new Error('GitLab calls are restricted to the configured projects')
+    return `projects/${encodeURIComponent(project)}`
+  }
   /**
    * Calls the DingTalk open API as the configured enterprise app, returning its JSON body.
    * A token is fetched once and cached in memory per AppKey; an expired-token answer drops the cache and retries the call
