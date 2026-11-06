@@ -4,6 +4,7 @@ import { dingtalkKind, dingtalkTrigger, dingtalkThreadId, dingtalkTime, dingtalk
   from '../src/sources/dingtalk.ts'
 import { dingtalkChannel } from '../src/sources/dingtalk-trigger.ts'
 import { sendDingtalk, clearDelivered } from '../src/sources/dingtalk-channel.ts'
+import { documentPaths } from '../src/sources/dingtalk-preview.ts'
 import { runDingtalk, setEventStream, setHistoryReader, consumerRetry } from '../src/sources/dingtalk-loops.ts'
 import { SourceRegistry } from '../src/sources/registry.ts'
 import { KV } from '../src/kv.ts'
@@ -14,7 +15,7 @@ import { testDeployment } from './fixtures/deployment.ts'
 import { SettingsSchema, settingsPolicy } from '../src/policy.ts'
 import { sourceContextOf, type SourceContextDeps } from '../src/app/source-context.ts'
 import { SetupError } from '../src/setup.ts'
-import { mkdtempSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -225,6 +226,65 @@ describe('dingtalk robustness (phase 2)', () => {
     applyDingtalk({ orchestrator: h, effect: (effect: () => () => unknown) => { disposers.push(effect()) } } as never)
     await vi.waitFor(() => expect(h.health.dingtalk).toMatchObject({ state: 'error', code: 'dingtalkStreamMissing' }))
     for (const dispose of disposers) await dispose()
+  })
+})
+
+describe('dingtalk document preview', () => {
+  /** A reply to a group whose session webhook answers; returns the Markdown the channel posted. */
+  async function sentBody(h: ReturnType<typeof host>, text: string, id = 'preview'): Promise<string> {
+    const webhook = vi.spyOn(h.commands, 'dingtalkWebhook').mockResolvedValue('sent')
+    expect(await sendDingtalk(h, { id, kind: 'reply', text, channel: dingtalkChannel('cid_a', 'msg_1', false, 'https://oapi/session') })).toBe('sent')
+    return (webhook.mock.calls[0]![1] as { markdown: { text: string } }).markdown.text
+  }
+  it('shows the local document a reply names, keeping the reply text first', async () => {
+    const h = host()
+    const document = join(mkdtempSync(join(tmpdir(), 'dingtalk-doc-')), '代码审查报告.md')
+    writeFileSync(document, '# 结论\n\n发现 2 个问题。\n')
+    const text = `审查完成。完整报告：\`${document}\``
+    const body = await sentBody(h, text)
+    expect(body.startsWith(text)).toBe(true)
+    expect(body).toContain('**文档预览：代码审查报告.md**')
+    expect(body).toContain('# 结论')
+    expect(body).toContain('发现 2 个问题。')
+  })
+  it('labels an English reply\'s preview in English', async () => {
+    const h = host()
+    const document = join(mkdtempSync(join(tmpdir(), 'dingtalk-doc-')), 'review.md')
+    writeFileSync(document, '# Findings\n')
+    const body = await sentBody(h, `Done. Report: \`${document}\``)
+    expect(body).toContain('**Document preview: review.md**')
+    expect(body).toContain('# Findings')
+  })
+  it('sends the reply unchanged when a named path is missing, is not a document, or is not a file', async () => {
+    const h = host()
+    const directory = mkdtempSync(join(tmpdir(), 'dingtalk-doc-'))
+    const source = join(directory, 'main.ts')
+    writeFileSync(source, 'export {}\n')
+    const folder = join(directory, 'notes.md')
+    mkdirSync(folder)
+    const text = `Done: \`${join(directory, 'missing.md')}\` \`${source}\` \`${folder}\``
+    expect(await sentBody(h, text)).toBe(text)
+  })
+  it('cuts a long preview inside the message budget and says what it left out', async () => {
+    const h = host()
+    const document = join(mkdtempSync(join(tmpdir(), 'dingtalk-doc-')), 'long.md')
+    const content = '# 报告\n\n' + '证据与建议。'.repeat(5000)
+    writeFileSync(document, content)
+    const body = await sentBody(h, `完成。报告：\`${document}\``)
+    expect(body).toContain(`_（预览已截断，全文 ${[...content].length} 字）_`)
+    expect(Buffer.byteLength(body)).toBeLessThan(14_000)
+    expect(body.length).toBeLessThan(content.length)
+  })
+  it('ignores a document-looking URL, which is not a local document', () => {
+    expect(documentPaths('See https://example.com/docs/review.md or `https://example.com/docs/notes.md`.')).toEqual([])
+  })
+  it('finds each named document once, keeping a path with spaces in a code span whole', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'dingtalk-doc-'))
+    const first = join(directory, 'first report.md')
+    const second = join(directory, 'second.md')
+    writeFileSync(first, '# one\n')
+    writeFileSync(second, '# two\n')
+    expect(documentPaths(`\`${first}\` and again ${second}, then ${second} and \`${join(directory, 'code.ts')}\``)).toEqual([first, second])
   })
 })
 
