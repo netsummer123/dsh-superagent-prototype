@@ -384,7 +384,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/sources/dingtalk.ts` | The DingTalk kind and plugin entry, exported as `./dingtalk-watch`, and the optional Stream consumer loader |
 | `src/sources/dingtalk-trigger.ts` | DingTalk robot callbacks and history items as Triggers, and DingTalk addresses |
 | `src/sources/dingtalk-loops.ts` | The DingTalk loops: the Stream consumer, optional history backfill, conversation names, and polling of subscribed threads |
-| `src/sources/dingtalk-channel.ts` | The DingTalk Channel: session-webhook and robot-API replies, `sent` or `gone`, and chat links |
+| `src/sources/dingtalk-channel.ts` | The DingTalk Channel: session-webhook and robot-API replies with a preview of a document the reply names by path, `sent` or `gone`, and chat links |
+| `src/sources/dingtalk-preview.ts` | The preview appended to a DingTalk reply: the local Markdown or text documents its paths name, cut to a byte budget inside the message limit |
 | `src/sources/dingtalk-read.ts` | The `dingtalk/` reads of a Trigger's conversation window and the message it threads under or answers, and `dingtalkThreadContext` for assessments |
 | `src/sources/gitlab.ts` | The GitLab kind and plugin entry, exported as `./gitlab-watch`: per-project Issue, merge-request and default-branch pipeline polling, subscribed Threads, and the plugin entry |
 | `src/sources/gitlab-trigger.ts` | GitLab issues, merge requests, notes and pipelines as Triggers, and GitLab addresses and project slugs |

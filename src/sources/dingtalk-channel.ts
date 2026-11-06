@@ -4,6 +4,7 @@ import { CliError } from '../infra/commands.ts'
 import { checkedImText } from '../infra/text.ts'
 import type { SourceContext } from './host.ts'
 import type { ChannelLink, ChannelLinks } from './kind.ts'
+import { withDocumentPreview } from './dingtalk-preview.ts'
 import { dingtalkTriggerId } from './dingtalk-trigger.ts'
 
 /** True when DingTalk permanently refuses delivery: an expired session webhook or a conversation the bot no longer serves. */
@@ -14,15 +15,16 @@ const delivered = new Set<string>()
 /** A robot code is required by the send APIs; the app key stands in when the robot info did not report one. */
 const robotCode = (commands: Pick<SourceContext['commands'], 'deployment'>): string => commands.deployment.dingtalk?.robotCode ?? ''
 /**
- * Replies in the conversation of the target message. It first posts to the callback's session webhook, which answers in the
- * original thread; when that window has closed it sends through the robot API. A repeated message id is sent at most once.
+ * Replies in the conversation of the target message, with a preview of any local document the reply names by path so the
+ * document reads in the chat. It first posts to the callback's session webhook, which answers in the original thread; when
+ * that window has closed it sends through the robot API. A repeated message id is sent at most once.
  */
 export async function sendDingtalk(host: Pick<SourceContext, 'commands'>, message: OutboundMessage): Promise<'sent' | 'gone'> {
   const { commands } = host
   const { conversationId, msgId, sessionWebhook, direct } = message.channel.address
   if (!conversationId) throw new Error('Missing DingTalk reply target')
   if (delivered.has(message.id)) return 'sent'
-  const text = checkedImText(message.text)
+  const text = await withDocumentPreview(checkedImText(message.text))
   // A session webhook is one-shot and carries its own credential; prefer it so the reply lands in the original thread.
   if (sessionWebhook) {
     try {
