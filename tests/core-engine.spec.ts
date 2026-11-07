@@ -240,6 +240,18 @@ describe('subscription fan-out', () => {
     expect(ticket.assignments).toHaveLength(2)
     expect(ticket.inputs.filter(input => input.kind === 'resumed')).toHaveLength(1)
   })
+  it('adds a host-authored text Input that reaches the running worker, and refuses an ended ticket', () => {
+    const h = harness()
+    const ticketId = accepted(h).ticketId!
+    h.engine.addInput(ticketId, '[质量门禁] 审查未通过：1 条')
+    const ticket = h.repo.tickets.get(ticketId)!
+    const gateInput = ticket.inputs.find(input => input.kind === 'text')!
+    expect(gateInput).toMatchObject({ kind: 'text', text: '[质量门禁] 审查未通过：1 条' })
+    // The Input is queued for delivery to the running assignment.
+    expect(ticket.undelivered).toContain(gateInput.id)
+    h.engine.stopTicket(ticketId)
+    expect(() => h.engine.addInput(ticketId, 'late')).toThrow(UserError)
+  })
   it('takes delivery reports only from the assignment that still runs the open ticket', () => {
     const h = harness()
     const ticketId = accepted(h).ticketId!

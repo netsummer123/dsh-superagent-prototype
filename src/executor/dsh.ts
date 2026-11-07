@@ -331,10 +331,10 @@ export class DshExecutor implements Executor {
    * Records on the ticket that it develops in `directory`, a work tree of `repo`, so its workspace, the lock its project takes and
    * the cleanup at its end all follow the ticket rather than a registry entry that may be renamed or deleted meanwhile.
    */
-  private adoptWorktree(ticket: Ticket, repo: string, directory: string): void {
+  private adoptWorktree(ticket: Ticket, repo: string, directory: string, base?: string): void {
     const execution = ticket.execution
-    if (!execution || (execution.repo === repo && execution.directory === directory)) return
-    const next = { ...ticket, execution: { ...execution, directory, repo } }
+    if (!execution || (execution.repo === repo && execution.directory === directory && (!base || execution.base === base))) return
+    const next = { ...ticket, execution: { ...execution, directory, repo, ...base && execution.base !== base ? { base } : {} } }
     this.host.store.atomic(() => this.host.store.tickets.save(next))
     ticket.execution = next.execution
   }
@@ -349,7 +349,10 @@ export class DshExecutor implements Executor {
       throw new PrepareFailed(`The project repository is not usable: ${error instanceof Error ? error.message : String(error)}`)
     })
     const exists = await stat(directory).then(() => true, () => false)
+    let base = ticket.execution?.base
     if (!exists) {
+      // Record the commit the branch starts from so the quality gate reviews only this ticket's work; kill two birds here.
+      base = ticket.execution?.base ?? (await git(['rev-parse', 'HEAD']).then(output => output.trim()).catch(() => undefined))
       await git(['worktree', 'prune']).catch(() => '')
       // `-B` creates the branch, or resets it when a previous attempt already made one, so a retried launch is idempotent.
       await git(['worktree', 'add', '--force', '-B', `agent/${ticket.execution?.name ?? ticket.id}`, directory, 'HEAD'])
@@ -357,6 +360,11 @@ export class DshExecutor implements Executor {
           await rmdir(directory).catch(() => { /* git cleans up after itself; this only covers a partial checkout. */ })
           throw new PrepareFailed(`The project work tree could not be created: ${error instanceof Error ? error.message : String(error)}`)
         })
+    }
+    if (base && ticket.execution && ticket.execution.base !== base) {
+      const next = { ...ticket, execution: { ...ticket.execution, base } }
+      this.host.store.atomic(() => this.host.store.tickets.save(next))
+      ticket.execution = next.execution
     }
     await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
   }

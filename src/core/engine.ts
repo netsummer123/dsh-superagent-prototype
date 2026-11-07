@@ -238,6 +238,12 @@ export class Engine {
    */
   report(ticketId: string, report: WorkerReport): Ticket { return this.repo.atomic(() => this.assignments.report(ticketId, report)) }
   /**
+   * Add a host-authored text Input to an open ticket, as the quality gate does when it turns a `ready` report back with findings.
+   * It reaches the worker like any other Input, delivered to the running Assignment.
+   * @throws UserError for an unknown or ended ticket.
+   */
+  addInput(ticketId: string, text: string): Ticket { return this.repo.atomic(() => this.tickets.addTextInput(ticketId, text)) }
+  /**
    * Handles an assignment that was running when the host stopped: restarts it with a recovery note unless its latest report is
    * `waiting`, `ready`, `blocked`, or `failed` and no Input reached its worker after that report, in which case it keeps its
    * Session and state and gets the Inputs that wait for it.
@@ -267,4 +273,4 @@ export type EngineForPeople = Pick<Engine, 'stopTicket' | 'retryTicket' | 'reeva
 export type EngineForSettings = Pick<Engine, 'policyChanged'>
 /** What the Executor tells the Engine, and what its workers ask of it. */
 export type EngineForExecutor = Pick<Engine, 'assignmentStarted' | 'inputsDelivered' | 'inputsRead' | 'turnEnded' | 'deliveryFailed'
-  | 'assignmentInterrupted' | 'report' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply'>
+  | 'assignmentInterrupted' | 'report' | 'addInput' | 'markUnrelated' | 'handback' | 'followForContext' | 'reply'>

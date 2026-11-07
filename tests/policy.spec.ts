@@ -255,6 +255,7 @@ describe('settings migration', () => {
       policy: { rules: [], sources: { feishu: { allowed: [{ id: MEMBER, name: 'A' }], admission: {} }, github: { allowed: [{ id: 'a' }], admission: {} } } },
       eval: { mode: 'auto', timeoutSeconds: 90, model: { provider: 'p', model: 'm' } },
       executor: { model: null, maxWorkers: 5, directory: '', prepare: '', blockedCommands: [] },
+      qualityGate: { mode: 'off', onSeverity: 'critical', provider: 'ocr', effort: 'low', maxTokensBudget: 120_000, timeoutMinutes: 10, minCoverage: 0.9, projects: [], maxAttempts: 2, onUnavailable: 'block', ocrVersion: '1.13.6', llm: { url: '', model: '', protocol: 'openai', token: '', timeoutSec: 300 } },
       projects: { items: [], matchFallback: 'directory' },
     })
     expect(migrateSettings(migrated)).toEqual(migrated)

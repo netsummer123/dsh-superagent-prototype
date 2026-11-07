@@ -324,6 +324,11 @@ export interface Execution {
    * may have been renamed or deleted since. Absent means the ticket develops in place.
    */
   repo?: string
+  /**
+   * The commit the ticket's work tree branched from, recorded when it was created. The quality gate reviews `base..HEAD` so a
+   * later diff never includes work that predates the ticket. Absent for an in-place ticket or one prepared before this field.
+   */
+  base?: string
 }
 
 /** Whether a ticket is open: it has not ended. */

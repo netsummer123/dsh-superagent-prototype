@@ -169,6 +169,7 @@ const settingsView = (): ApiResponse<'GET settings'> => ({
   blocks: { policy: { value: server.settings.policy, revision: server.revisions.policy ?? 0 },
     eval: { value: server.settings.eval, revision: server.revisions.eval ?? 0 },
     executor: { value: server.settings.executor, revision: server.revisions.executor ?? 0 },
+    qualityGate: { value: server.settings.qualityGate, revision: server.revisions.qualityGate ?? 0 },
     projects: { value: server.settings.projects, revision: server.revisions.projects ?? 0 } },
   sources: sourceSettings(),
   environment: { root: '/srv/dsh-superagent/work', variables: [

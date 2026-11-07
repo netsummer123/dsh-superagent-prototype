@@ -116,16 +116,54 @@ export const ExecutorConfigSchema = z.object({
   blockedCommands: z.array(CommandNameSchema).default([]),
 }).strict()
 export const SourceInstanceSchema = z.object({ enabled: z.boolean().default(true), config: z.record(z.string(), z.unknown()).default({}) }).strict()
+/**
+ * The LLM endpoint the quality gate reviews with, kept separate from `executor.model` / `eval.model`: those name the harness's
+ * routing for the worker and orchestrator, while `ocr` is an external CLI that reads only `OCR_LLM_*` or its own config file.
+ * `token` may stay empty so a deployment supplies it as the `OCR_LLM_TOKEN` environment variable instead of a plaintext snapshot.
+ */
+export const QualityGateLlmSchema = z.object({
+  url: z.string().trim().refine(url => url === '' || /^https?:\/\//.test(url), 'An http(s) URL, or empty').default(''),
+  model: z.string().trim().default(''),
+  protocol: z.enum(['openai', 'anthropic']).default('openai'),
+  token: z.string().trim().default(''),
+  timeoutSec: z.number().int().min(10).max(600).default(300),
+}).strict()
+export type QualityGateLlm = z.infer<typeof QualityGateLlmSchema>
+/**
+ * The ticket quality gate: a host-run AI code review in front of a worker's `ready` report. `off` never runs; `observe` runs and
+ * records a receipt without ever blocking; `enforce` blocks a failing review and returns the findings to the worker as an Input.
+ */
+export const QualityGateConfigSchema = z.object({
+  mode: z.enum(['off', 'observe', 'enforce']).default('off'),
+  onSeverity: z.enum(['critical', 'high', 'medium']).default('critical'),
+  provider: z.enum(['ocr', 'deterministic']).default('ocr'),
+  effort: z.enum(['low', 'medium', 'high']).default('low'),
+  maxTokensBudget: z.number().int().min(0).default(120_000),
+  timeoutMinutes: z.number().int().min(1).max(30).default(10),
+  minCoverage: z.number().min(0).max(1).default(0.9),
+  projects: z.array(z.string().trim().min(1).max(LIMITS.projectName)).default([]),
+  maxAttempts: z.number().int().min(1).max(5).default(2),
+  /**
+   * What to do when the AI reviewer itself is unavailable (missing `ocr`, an unreachable endpoint, a 429/5xx retry exhaustion
+   * or a timeout). `block` is fail-closed: an uncertified change may not be handed to a person. `pass` degrades to the
+   * deterministic checks and only records the reason in the report. Only `enforce` mode can block; `observe` never does.
+   */
+  onUnavailable: z.enum(['block', 'pass']).default('block'),
+  ocrVersion: z.string().trim().default('1.13.6'),
+  llm: QualityGateLlmSchema.default(() => QualityGateLlmSchema.parse({})),
+}).strict()
+export type QualityGateConfig = z.infer<typeof QualityGateConfigSchema>
 export const SettingsSchema = z.object({
   paused: z.boolean().default(false),
   sources: z.record(z.string().regex(/^[a-z][a-z0-9-]*$/), SourceInstanceSchema).default({}),
   policy: PolicyConfigSchema.default(() => PolicyConfigSchema.parse({})),
   eval: EvalConfigSchema.default(() => EvalConfigSchema.parse({})),
   executor: ExecutorConfigSchema.default(() => ExecutorConfigSchema.parse({})),
+  qualityGate: QualityGateConfigSchema.default(() => QualityGateConfigSchema.parse({})),
   projects: ProjectsConfigSchema.default(() => ProjectsConfigSchema.parse({})),
 }).strict()
 export type Settings = z.infer<typeof SettingsSchema>
-export type SettingsBlock = 'policy' | 'eval' | 'executor' | 'projects' | `source:${string}`
+export type SettingsBlock = 'policy' | 'eval' | 'executor' | 'qualityGate' | 'projects' | `source:${string}`
 export type SettingsSave = SettingsBlock | 'pause'
 export type SettingsOrigin = 'panel' | 'tool' | 'sync'
 

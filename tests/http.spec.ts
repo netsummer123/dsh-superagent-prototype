@@ -46,7 +46,9 @@ it('answers each kind of failure with its own status', async () => {
   // Block names are validated before calling settings.save: reject unknown blocks or non-existent Sources.
   expect(await call('PUT', 'settings/pause', { value: {}, revision: 0 })).toMatchObject({ status: 400 })
   expect(await call('PUT', 'settings/source:feishu', { value: {}, revision: 0 })).toEqual({ status: 404, body: { error: 'Source not found' } })
-  expect(saves).toHaveLength(4)
+  // The quality gate is a first-class settings block: the route must not reject it as unknown.
+  expect(await call('PUT', 'settings/qualityGate', { value: {}, revision: 0 })).toEqual({ status: 200, body: { saved: true, revision: 1, restarting: false } })
+  expect(saves).toHaveLength(5)
   expect(await call('POST', 'tickets/t9/retry')).toEqual({ status: 404, body: { error: 'Ticket not found' } })
   expect(await call('GET', 'nothing/here')).toEqual({ status: 404, body: { error: 'Unknown operation' } })
   expect(await call('POST', 'executor/pause', 'not json')).toEqual({ status: 400, body: { error: 'The request body is not JSON' } })

@@ -4,6 +4,7 @@ import { liveTicket, type EngineForExecutor, type Ticket } from '../../core/inde
 import { IM_WORDS } from '../../infra/text.ts'
 import { claimPull, readPull } from '../../sources/github-pull.ts'
 import type { SourceContext } from '../../sources/host.ts'
+import { gateApplies, type QualityGate } from '../quality-gate.ts'
 import { readResource, type ResourceHost } from '../resources.ts'
 import type { Store } from '../store.ts'
 import { reportRelay, threadFollowedNotice } from '../notices.ts'
@@ -11,14 +12,20 @@ import type { Sessions } from '../sessions.ts'
 import { AcknowledgementSchema, readTool, tool, type Tool } from './tool.ts'
 
 export interface ExecutorToolsHost {
-  readonly engine: Pick<EngineForExecutor, 'report' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
-  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic'>
+  readonly engine: Pick<EngineForExecutor, 'report' | 'addInput' | 'reply' | 'markUnrelated' | 'handback' | 'followForContext'>
+  readonly store: Pick<Store, 'tickets' | 'replyStatus' | 'atomic' | 'settings'>
   readonly sessions: Pick<Sessions, 'relay' | 'notify'>
   readonly resources: ResourceHost
   /** GitHub Source context whose pull-request rules govern claiming a reported PR. */
   readonly github: SourceContext
+  /** The ticket quality gate that guards a `ready` report; absent means the feature is not wired. */
+  readonly qualityGate?: QualityGate
   sendReplies(): Promise<void>
 }
+
+/** How many times this ticket's `ready` report has already been turned back by the quality gate (its findings Inputs so far). */
+const qualityGateAttempts = (ticket: Ticket): number =>
+  ticket.inputs.filter(input => input.kind === 'text' && input.text.startsWith('[质量门禁]')).length
 
 export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
   const ticketId = ticket.id
@@ -85,19 +92,47 @@ export function executorTools(host: ExecutorToolsHost, ticket: Ticket): Tool[] {
       execute: async (args, signal) => {
         const current = host.store.tickets.get(ticketId)
         if (!current || !liveTicket(current)) throw new Error('Ticket ended (PR was closed or work finished); do not resume it')
+
+        // The quality gate guards `ready`: an enforce failure turns the report back with the findings instead of ending the ticket.
+        let summary = args.summary
+        let gateNote = ''
+        const config = host.store.settings().qualityGate
+        if (args.state === 'ready' && host.qualityGate && gateApplies(config, current)) {
+          const attempts = qualityGateAttempts(current)
+          const verdict = await host.qualityGate.check({ ticket: current, config, attempts, signal })
+          gateNote = verdict.summary
+          // `blocksHandover` is computed by the gate: `enforce` blocks everything, and an unavailable reviewer blocks in any
+          // mode when `onUnavailable=block`. `observe` still only shadows findings.
+          if (verdict.blocksHandover) {
+            // A reviewer that never ran is an operational fault, not a defect the worker can fix. Once the retry budget is
+            // spent, escalate to a person instead of looping on `progress` forever: no uncertified change is handed over.
+            const reason = verdict.unavailable
+              ? `审查器不可用（${verdict.receipt.reason ?? 'ocr_unavailable'}），按配置不得交工。`
+              : `质量门禁未通过：阻断 ${verdict.blocking} 条。${verdict.receipt.outcome === 'reviewed' ? '见下一条输入中的阻断项。' : ''}`
+            return host.store.atomic(() => {
+              host.engine.report(ticketId, { state: verdict.exhausted ? 'blocked' : 'progress', summary: reason })
+              if (verdict.input) host.engine.addInput(ticketId, verdict.input.text)
+              return { reported: true, notification: 'internal_only', gate: verdict.unavailable ? 'unavailable' : 'failed',
+                blocking: verdict.blocking, exhausted: verdict.exhausted, receipt: verdict.receipt.fingerprint }
+            })
+          }
+          // observe mode records the outcome in the summary but never blocks.
+          if (gateNote) summary = `${summary}\n\n${gateNote}`
+        }
+
         const pull = args.pr_number != null ? await readPull(host.github, args.pr_number, signal) : undefined
         // Claim the PR, record the report, and queue the relay atomically so a rejected PR claim or invalid report leaves no partial state, and a recorded report always reaches the main Session.
         return host.store.atomic(() => {
           const refused = pull && claimPull(host.github, ticketId, pull)
           if (refused) throw new Error(refused)
-          const report = { state: args.state, summary: args.summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
+          const report = { state: args.state, summary, ...(args.human_action !== undefined ? { question: args.human_action } : {}),
             ...(args.question_for_trigger_id ? { askedBy: args.question_for_trigger_id } : {}),
             ...(args.reply_to_trigger_id ? { answers: args.reply_to_trigger_id } : {}) }
           const updated = host.engine.report(ticketId, report)
           const relay = reportRelay(updated, report)
           if (relay) host.sessions.relay(relay.id, relay.text)
           const notification = relay ? 'orchestrator' : 'internal_only'
-          return { reported: true, notification, ...(updated.attention ? { attention: updated.attention } : {}) }
+          return { reported: true, notification, ...(gateNote ? { gate: 'passed', receipt: gateNote } : {}), ...(updated.attention ? { attention: updated.attention } : {}) }
         })
       },
     }),

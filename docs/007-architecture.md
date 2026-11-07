@@ -348,6 +348,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/tools/tool.ts` | The `Tool` type, `readTool`, the `orchestrator_read` of both roles, and `AcknowledgementSchema` |
 | `src/app/tools/main.ts` | The main Session's tools |
 | `src/app/tools/executor.ts` | An Executor Session's tools |
+| `src/app/quality-gate.ts` | The ticket quality gate: a host-run `ocr` review ahead of a `ready` report, its zero-AI checks, finding counts, receipt cache, the findings Input it hands back, and fail-closed handling of an unavailable reviewer |
 | `src/app/http.ts` | The `/orchestrator/api` routes: the same-origin check, request limits and one status per kind of failure |
 | `src/app/api.ts` | `Api`, every route with its parameters, query, body and response, and the filters of the lists; it imports only types, so the panel bundles it |
 | `src/app/views/text.ts` | The two forms of a view's text: `preview`, plain text on one line, and `markdown` without HTML; `plain` and `readable` |
@@ -400,6 +401,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/client/overview.tsx` | The overview |
 | `src/client/source.tsx`, `trigger.tsx`, `eval.tsx`, `execution.tsx` | One file per stage: its status, and its settings where it has some |
 | `src/client/projects.tsx` | The local project registry settings group: one row per project, its name, directory and keywords, removed by a delete button |
+| `src/client/quality.tsx` | The quality-gate settings group: the mode, blocking severity, effort, the reviewer endpoint and its token, and the budget, coverage and attempt limits |
 | `src/client/thread.tsx`, `ticket.tsx` | The record pages: a Thread with its timeline, and a Ticket with its authorization, Inputs and Assignments |
 | `src/client/settings.tsx` | The Settings tab: the group navigation and the group on screen |
 | `src/client/settings-kit.tsx` | The building blocks of settings blocks: the settings the stage groups share, `useBlockDraft`, the fields, among them a Source kind's, and the history of saves |
@@ -424,6 +426,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | --- | --- |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
+| `tests/quality-gate.spec.ts` | The ticket quality gate: applicability, result parsing, blocking counts, verdicts, the `OCR_LLM_*` environment, preview short-circuit and receipt cache, findings Inputs, endpoint-unavailable degradation and coverage blocking |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |
 | `tests/registry.spec.ts` | `SourceRegistry`: instances, validation, Policy parts, Channels and Thread context |
 | `tests/sources.spec.ts` | The Feishu and GitHub Sources on a `SourceContext`: translation, polls and read positions, the pull request rules, health |

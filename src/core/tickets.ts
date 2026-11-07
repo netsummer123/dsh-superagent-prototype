@@ -244,6 +244,17 @@ export class Tickets extends EnginePart {
     else if (latest?.state === 'pending' && !waitsForPerson(ticket)) this.options.executor.start(ticket, latest)
   }
   /**
+   * Add a host-authored text Input to an open ticket, keyed so the same text is added at most once per ticket revision. Used by
+   * the quality gate to hand findings back to the worker.
+   * @throws UserError for an unknown or ended ticket.
+   */
+  addTextInput(ticketId: string, text: string): Ticket {
+    const ticket = this.require(ticketId)
+    if (!liveTicket(ticket)) throw new UserError('ticketEnded')
+    this.addInput(ticket, { id: key('input', ticketId, 'quality-gate', ticket.updatedAt, String(text.length)), kind: 'text', text, at: this.now() })
+    return this.require(ticketId)
+  }
+  /**
    * Resume an ended ticket under its unchanged Mandate when a person's message on one of its Threads waits for it: no Eval
    * and no Decision, since nothing new is authorized. One whose Mandate the current Policy no longer holds stays ended and
    * takes nothing (see `refuse`). While processing is paused the message waits, and the first pass after the pause resumes
