@@ -104,9 +104,12 @@
 .dt-model { display: flex; flex-direction: column; gap: 6px; }
 .dt-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .dt-projects td, .dt-projects th { padding: 4px 6px; vertical-align: middle; }
-.dt-projects td:last-child, .dt-projects th:last-child { width: 56px; text-align: right; }
+.dt-projects td:last-child, .dt-projects th:last-child { width: 56px; text-align: center; }
 .dt-projects .dt-input { width: 100%; }
 .dt-danger-link { color: var(--dsw-alias-state-error-primary); }
+/* The per-row delete button: enlarged and centered in the actions cell, as a square hit area. */
+.dt-project-remove { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; margin: 0 auto; border-radius: 6px; text-align: center; vertical-align: middle; }
+.dt-project-remove:hover { text-decoration: none; background: var(--dsw-alias-interactive-bg-hover); }
 .dt-changes { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 20px; }
 .dt-changes li::before { content: '· '; color: var(--dsw-alias-label-caption); }
 .dt-main { display: flex; flex-direction: column; gap: 24px; min-width: 0; }

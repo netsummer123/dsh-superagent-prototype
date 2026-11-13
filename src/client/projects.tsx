@@ -43,9 +43,9 @@ export function ProjectSettings() {
                   onChange={event => set(index, { path: event.target.value })} /></td>
                 <td><Input value={row.keywords} placeholder={t('projectKeywordsEmpty')}
                   onChange={event => set(index, { keywords: event.target.value })} /></td>
-                <td><button type="button" className="dt-textlink dt-danger-link"
+                <td><button type="button" className="dt-textlink dt-danger-link dt-project-remove"
                   title={t('projectRemove')} aria-label={`${t('projectRemove')} ${row.name || index + 1}`} onClick={() => remove(index)}>
-                  <Icon name="trash" size={14} /></button></td>
+                  <Icon name="trash" size={18} /></button></td>
               </tr>)}</tbody>
             </table>}
             <button type="button" className="dt-textlink" onClick={() => draft.edit({ ...value, items: [...rows, { ...EMPTY_ROW }] })}>
