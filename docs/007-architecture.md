@@ -500,6 +500,7 @@ A generated column is computed from its row's JSON and is empty outside its set,
 | Settings versions | `settings-revision`, `settings-version:<n>`, `settings-block-revision:<block>`; snapshots include origin, Policy version and affected Tickets |
 | Prompt versions | `prompt-revision`, `prompt-version:<n>` |
 | Main Session | `master-id` |
+| Person notifications | `person-notified`: `ticket:action` -> when the PersonNotify loop announced that need |
 | Session prompt history | `session-prompts:<session id>` |
 | Source state | Read positions such as `github-cursor:<number>`, PR CI fingerprints and seen Feishu-topic messages; keys begin with the kind or `thread-` plus a Thread key |
 | Display names | `source-labels:<source id>` |
