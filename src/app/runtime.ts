@@ -168,6 +168,7 @@ export class Runtime extends Service implements SourceHost {
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.personNotify = new PersonNotify({ store, commands, deployment: () => setup.deployment,
         report: message => { this.personNotifyHealth.set({ state: 'error', detail: message }) },
+        ok: () => { this.personNotifyHealth.set({ state: 'ready', detail: '' }) },
         // The panel a person opens can differ from loopback; a deployment overrides it through the environment, else the default stands.
         panelUrl: () => process.env.DSH_SUPERAGENT_PANEL_URL || undefined, appName: () => process.env.DSH_SUPERAGENT_APP_NAME || undefined })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },

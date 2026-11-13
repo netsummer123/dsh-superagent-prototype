@@ -14,8 +14,6 @@ import type { Store } from './store.ts'
 const SCAN_MS = 5_000
 /** Consecutive failed sends of one ticket:action before the loop stops retrying it and reports it once on the health board. */
 const MAX_SEND_FAILURES = 5
-/** Fallback panel address when the deployment supplies none; the loopback default matches the reference profile's port. */
-const DEFAULT_PANEL_URL = 'http://127.0.0.1:3082'
 /** Fallback app name shown in the message head. */
 const DEFAULT_APP_NAME = 'super-agent'
 
@@ -36,7 +34,9 @@ export interface PersonNotifyHost {
   deployment(): Deployment | undefined
   /** Records an unexpected failure of the loop; the runtime decides where it surfaces. */
   report(message: string): void
-  /** URL of the panel a person opens, and the app name shown in the message head. Deployment-supplied; have sane defaults. */
+  /** A pass finished with nothing wrong; the runtime clears any earlier error state. */
+  ok?(): void
+  /** URL of the panel a person opens, and the app name shown in the message head, when the deployment supplies them. */
   panelUrl?(): string | undefined
   appName?(): string | undefined
 }
@@ -81,38 +81,46 @@ export class PersonNotify {
       if (announced[key]) next[key] = announced[key]!
       else pending.push({ key, ticket, action: stage.action })
     }
+    const live = new Set(pending.map(item => item.key))
+    // Forget failure counts for needs that are gone, so a fresh need for the same ticket:action can be announced again.
+    for (const key of this.failures.keys()) if (!live.has(key)) this.failures.delete(key)
     // Send each new need on its own: one failing send is reported and skipped (retried next pass) without silencing the rest
     // or re-announcing those already recorded. Stop between sends if the runtime is shutting down, but still persist the map.
     for (const item of pending) {
       if (signal.aborted) break
       const failed = this.failures.get(item.key) ?? 0
+      // Once a need has failed past the cap, report it once and leave it; the count was pruned above when the need is gone.
       if (failed >= MAX_SEND_FAILURES) continue
       try {
         await this.send(bot.robotCode || bot.appKey, recipients, item.ticket, item.action)
       } catch (error) {
         const count = failed + 1
         this.failures.set(item.key, count)
-        this.host.report(`person-notify: send ${item.key} (attempt ${count}): ${error instanceof Error ? error.message : String(error)}`)
+        const detail = `person-notify: send ${item.key} (attempt ${count}): ${error instanceof Error ? error.message : String(error)}`
+        if (count >= MAX_SEND_FAILURES) this.host.report(`${detail} — giving up until the need changes`)
         continue
       }
       this.failures.delete(item.key)
       next[item.key] = new Date().toISOString()
     }
-    // Persist the whole map once, which also prunes records whose need is gone and stops a write on every idle tick.
-    if (JSON.stringify(next) !== JSON.stringify(announced)) this.host.store.set(KV.personNotify.notified, next)
+    // Persist the whole map once, comparing key/value sets (not text order), so an idle tick writes nothing.
+    const changed = Object.keys(next).length !== Object.keys(announced).length
+      || Object.keys(next).some(key => next[key] !== announced[key])
+    if (changed) this.host.store.set(KV.personNotify.notified, next)
+    this.host.ok?.()
   }
 
   private async send(robotCode: string, userIds: string[], ticket: Ticket, action: PersonAction): Promise<void> {
-    // The latest report's own summary, when the worker wrote one, tells the person what happened.
+    // The latest report's own summary, or the open question, tells the person what happened.
     const report = [...ticket.assignments].reverse().find(a => a.report)?.report
-    const summary = report?.summary ?? (ticket.attention as { text?: string } | undefined)?.text ?? ''
+    const summary = report?.summary ?? ticket.attention?.question ?? ''
     const app = this.host.appName?.() ?? DEFAULT_APP_NAME
-    const panel = this.host.panelUrl?.() ?? DEFAULT_PANEL_URL
+    const panel = this.host.panelUrl?.()
     const content = [
       `【${app}】有工单需要你处理：${ACTION_HINT[action]}`,
       `工单：${ticket.title}`,
       summary ? `进度：${summary.slice(0, 300)}` : '',
-      `请在面板「${app} → 概览」查看：${panel}`,
+      panel ? `请在面板「${app} → 概览」查看：${panel}` : '',
     ].filter(Boolean).join('\n')
     await this.host.commands.dingtalk('/v1.0/robot/oToMessages/batchSend', {
       robotCode, userIds, msgKey: 'sampleText', msgParam: JSON.stringify({ content }),
