@@ -59,18 +59,25 @@ export class PersonNotify {
     if (!recipients.length) return
     const announced = this.host.store.get(KV.runtime.personNotified) ?? {}
     const next: Record<string, string> = {}
-    let changed = false
     for (const ticket of this.host.store.tickets.list()) {
       if (ticket.ended) continue
       const stage = ticketStage(ticket)
       if (stage.stage !== 'person') continue
       const key = `${ticket.id}:${stage.action}`
       if (announced[key]) { next[key] = announced[key]!; continue }
-      await this.send(bot.robotCode || bot.appKey, recipients, ticket, stage.action)
+      try {
+        await this.send(bot.robotCode || bot.appKey, recipients, ticket, stage.action)
+      } catch (error) {
+        // One failed send must not stop the pass or re-announce earlier ones; record it and try this ticket next tick.
+        this.host.report(`person-notify: send ${key}: ${error instanceof Error ? error.message : String(error)}`)
+        continue
+      }
+      // Persist as soon as the message goes out, so a later failure cannot leave a delivered need unrecorded and repeated.
       next[key] = new Date().toISOString()
-      changed = true
+      this.host.store.set(KV.runtime.personNotified, next)
     }
-    if (changed || Object.keys(announced).length !== Object.keys(next).length) this.host.store.set(KV.runtime.personNotified, next)
+    // Prune records whose need is gone so the map stays bounded, writing only when the set of live keys shrank.
+    if (Object.keys(next).length !== Object.keys(announced).length) this.host.store.set(KV.runtime.personNotified, next)
   }
 
   private async send(robotCode: string, userIds: string[], ticket: Ticket, action: PersonAction): Promise<void> {
