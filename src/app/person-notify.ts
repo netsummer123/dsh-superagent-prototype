@@ -16,6 +16,8 @@ const SCAN_MS = 5_000
 const MAX_SEND_FAILURES = 5
 /** Fallback app name shown in the message head. */
 const DEFAULT_APP_NAME = 'super-agent'
+/** Truncation limit (characters) for a report summary inside the DingTalk text body. */
+const SUMMARY_MAX = 300
 
 type PersonAction = 'review' | 'answer' | 'delivery' | 'blocked' | 'failed'
 /** What a person must do, in the words the DingTalk message uses. */
@@ -65,9 +67,9 @@ export class PersonNotify {
 
   private async scan(signal: AbortSignal): Promise<void> {
     const bot = this.host.deployment()?.dingtalk
-    if (!bot) return
+    if (!bot) { this.host.ok?.(); return }
     const recipients = (this.host.store.settings().policy.sources.dingtalk?.allowed ?? []).map(entry => entry.id).filter(Boolean)
-    if (!recipients.length) return
+    if (!recipients.length) { this.host.ok?.(); return }
     const announced = this.host.store.get(KV.personNotify.notified) ?? {}
     // Build the full next map from every live, person-stage ticket first: keep records already announced, and queue new
     // needs. Seeding from `announced` up front means the map is complete even if a send fails or the pass is cut short.
@@ -86,14 +88,16 @@ export class PersonNotify {
     for (const key of this.failures.keys()) if (!live.has(key)) this.failures.delete(key)
     // Send each new need on its own: one failing send is reported and skipped (retried next pass) without silencing the rest
     // or re-announcing those already recorded. Stop between sends if the runtime is shutting down, but still persist the map.
+    let failedThisPass = false
     for (const item of pending) {
       if (signal.aborted) break
       const failed = this.failures.get(item.key) ?? 0
-      // Once a need has failed past the cap, report it once and leave it; the count was pruned above when the need is gone.
+      // A need past the cap is left for good until its count is pruned when the need is gone; do not resend it.
       if (failed >= MAX_SEND_FAILURES) continue
       try {
         await this.send(bot.robotCode || bot.appKey, recipients, item.ticket, item.action)
       } catch (error) {
+        failedThisPass = true
         const count = failed + 1
         this.failures.set(item.key, count)
         const detail = `person-notify: send ${item.key} (attempt ${count}): ${error instanceof Error ? error.message : String(error)}`
@@ -107,19 +111,20 @@ export class PersonNotify {
     const changed = Object.keys(next).length !== Object.keys(announced).length
       || Object.keys(next).some(key => next[key] !== announced[key])
     if (changed) this.host.store.set(KV.personNotify.notified, next)
-    this.host.ok?.()
+    // Only report the slot healthy after a pass with no failed send: a giving-up error set above must stay visible.
+    if (!failedThisPass) this.host.ok?.()
   }
 
   private async send(robotCode: string, userIds: string[], ticket: Ticket, action: PersonAction): Promise<void> {
     // The latest report's own summary, or the open question, tells the person what happened.
-    const report = [...ticket.assignments].reverse().find(a => a.report)?.report
+    const report = ticket.assignments.findLast(a => a.report)?.report
     const summary = report?.summary ?? ticket.attention?.question ?? ''
     const app = this.host.appName?.() ?? DEFAULT_APP_NAME
     const panel = this.host.panelUrl?.()
     const content = [
       `【${app}】有工单需要你处理：${ACTION_HINT[action]}`,
       `工单：${ticket.title}`,
-      summary ? `进度：${summary.slice(0, 300)}` : '',
+      summary ? `进度：${summary.slice(0, SUMMARY_MAX)}` : '',
       panel ? `请在面板「${app} → 概览」查看：${panel}` : '',
     ].filter(Boolean).join('\n')
     await this.host.commands.dingtalk('/v1.0/robot/oToMessages/batchSend', {
