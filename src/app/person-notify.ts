@@ -12,6 +12,8 @@ import type { Store } from './store.ts'
 
 /** How often the loop scans tickets, in milliseconds. */
 const SCAN_MS = 5_000
+/** Fallback panel address when the deployment supplies none; the loopback default matches the reference profile's port. */
+const DEFAULT_PANEL_URL = 'http://127.0.0.1:3082'
 
 type PersonAction = 'review' | 'answer' | 'delivery' | 'blocked' | 'failed'
 /** What a person must do, in the words the DingTalk message uses. */
@@ -30,6 +32,9 @@ export interface PersonNotifyHost {
   deployment(): Deployment | undefined
   /** Records an unexpected failure of the loop; the runtime decides where it surfaces. */
   report(message: string): void
+  /** URL of the panel a person opens, and the app name shown in the message head. Deployment-supplied; have sane defaults. */
+  panelUrl?(): string
+  appName?(): string
 }
 
 /**
@@ -44,7 +49,7 @@ export class PersonNotify {
   start(signal: AbortSignal): void {
     const tick = async (): Promise<void> => {
       if (signal.aborted) return
-      try { await this.scan() } catch (error) { this.host.report(`person-notify: ${error instanceof Error ? error.message : String(error)}`) }
+      try { await this.scan(signal) } catch (error) { this.host.report(`person-notify: ${error instanceof Error ? error.message : String(error)}`) }
       if (!signal.aborted) this.timer = setTimeout(() => void tick(), SCAN_MS)
     }
     void tick()
@@ -52,32 +57,38 @@ export class PersonNotify {
 
   stop(): void { if (this.timer) clearTimeout(this.timer); this.timer = undefined }
 
-  private async scan(): Promise<void> {
+  private async scan(signal: AbortSignal): Promise<void> {
     const bot = this.host.deployment()?.dingtalk
     if (!bot) return
     const recipients = (this.host.store.settings().policy.sources.dingtalk?.allowed ?? []).map(entry => entry.id).filter(Boolean)
     if (!recipients.length) return
     const announced = this.host.store.get(KV.runtime.personNotified) ?? {}
+    // Build the full next map from every live, person-stage ticket first: keep records already announced, and queue new
+    // needs. Seeding from `announced` up front means the map is complete even if a send fails or the pass is cut short.
     const next: Record<string, string> = {}
+    const pending: { key: string; ticket: Ticket; action: PersonAction }[] = []
     for (const ticket of this.host.store.tickets.list()) {
       if (ticket.ended) continue
       const stage = ticketStage(ticket)
       if (stage.stage !== 'person') continue
       const key = `${ticket.id}:${stage.action}`
-      if (announced[key]) { next[key] = announced[key]!; continue }
+      if (announced[key]) next[key] = announced[key]!
+      else pending.push({ key, ticket, action: stage.action })
+    }
+    // Send each new need on its own: one failing send is reported and skipped (retried next pass) without silencing the rest
+    // or re-announcing those already recorded. Stop between sends if the runtime is shutting down.
+    for (const item of pending) {
+      if (signal.aborted) return
       try {
-        await this.send(bot.robotCode || bot.appKey, recipients, ticket, stage.action)
+        await this.send(bot.robotCode || bot.appKey, recipients, item.ticket, item.action)
       } catch (error) {
-        // One failed send must not stop the pass or re-announce earlier ones; record it and try this ticket next tick.
-        this.host.report(`person-notify: send ${key}: ${error instanceof Error ? error.message : String(error)}`)
+        this.host.report(`person-notify: send ${item.key}: ${error instanceof Error ? error.message : String(error)}`)
         continue
       }
-      // Persist as soon as the message goes out, so a later failure cannot leave a delivered need unrecorded and repeated.
-      next[key] = new Date().toISOString()
-      this.host.store.set(KV.runtime.personNotified, next)
+      next[item.key] = new Date().toISOString()
     }
-    // Prune records whose need is gone so the map stays bounded, writing only when the set of live keys shrank.
-    if (Object.keys(next).length !== Object.keys(announced).length) this.host.store.set(KV.runtime.personNotified, next)
+    // Persist the whole map once, which also prunes records whose need is gone, so the map stays bounded.
+    this.host.store.set(KV.runtime.personNotified, next)
   }
 
   private async send(robotCode: string, userIds: string[], ticket: Ticket, action: PersonAction): Promise<void> {
@@ -85,10 +96,10 @@ export class PersonNotify {
     const report = [...ticket.assignments].reverse().find(a => a.report)?.report
     const summary = report?.summary ?? (ticket.attention as { text?: string } | undefined)?.text ?? ''
     const content = [
-      `【super-agent】有工单需要你处理：${ACTION_HINT[action]}`,
+      `【${this.host.appName?.() ?? 'super-agent'}】有工单需要你处理：${ACTION_HINT[action]}`,
       `工单：${ticket.title}`,
       summary ? `进度：${summary.slice(0, 300)}` : '',
-      '请在面板「Superagent → 概览」查看：http://127.0.0.1:3082',
+      `请在面板「${this.host.appName?.() ?? 'Superagent'} → 概览」查看：${this.host.panelUrl?.() ?? DEFAULT_PANEL_URL}`,
     ].filter(Boolean).join('\n')
     await this.host.commands.dingtalk('/v1.0/robot/oToMessages/batchSend', {
       robotCode, userIds, msgKey: 'sampleText', msgParam: JSON.stringify({ content }),

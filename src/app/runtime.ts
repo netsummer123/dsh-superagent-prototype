@@ -77,6 +77,7 @@ export class Runtime extends Service implements SourceHost {
   readonly ready: Promise<void>
   private readonly board = new HealthBoard()
   private readonly runtimeHealth = this.board.claim('runtime', { state: 'starting', detail: '' })
+  private readonly personNotifyHealth = this.board.claim('person-notify', { state: 'ready', detail: '' })
   readonly masterId: string
   private readonly sourceLinks = new TextCache(200_000)
   private readonly stopped = new AbortController()
@@ -166,7 +167,7 @@ export class Runtime extends Service implements SourceHost {
       const passes = this.passes = new Passes({ engine: { receive: trigger => engine.receive(trigger), evaluateDue }, effects,
         health: this.runtimeHealth, lifetime: this.lifetime, configured: () => setup.configured(), closing: () => this.closing() })
       this.personNotify = new PersonNotify({ store, commands, deployment: () => setup.deployment,
-        report: message => { board.claim('person-notify', { state: 'error', detail: message }) } })
+        report: message => { this.personNotifyHealth.set({ state: 'error', detail: message }) } })
       this.sourceDeps = { store, engine, outbox, commands, sources, get ready() { return runtime.ready },
         get deployment() { return setup.deployment }, configured: () => setup.configured(),
         get setupProblem() { return setup.problem }, get feishuProblem() { return setup.feishuProblem }, get dingtalkProblem() { return setup.dingtalkProblem },
