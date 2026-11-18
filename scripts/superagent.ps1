@@ -127,12 +127,43 @@ function Test-PortListening {
 
 # Runs an authenticated GET against the management API and returns the parsed JSON, or $null on failure.
 function Invoke-State {
+  $probe = Get-StateProbe
+  if ($probe.Kind -eq 'ok') { return $probe.State }
+  return $null
+}
+
+# Probes the management API and classifies the result so callers can tell "definitely nothing answers" (connection refused)
+# from "indeterminate" (timeout, non-2xx, TLS/proxy error, unparsable body). Kind is one of:
+#   ok            an instance answered with 2xx JSON (State set)
+#   refused       connection actively refused -> no process is listening here (safe to start)
+#   unreachable   DNS/route refused/unreachable -> nothing serves this URL (safe to start)
+#   indeterminate anything else (timeout, 5xx, bad JSON): an instance may still be up; do NOT assume it is down.
+function Get-StateProbe {
   try {
     $resp = Invoke-WebRequest -UseBasicParsing -TimeoutSec 5 -Uri "$BaseUrl/orchestrator/api/state" `
       -Headers @{ 'x-orchestrator-request' = '1' } -ErrorAction Stop
-    if ($resp.StatusCode -eq 200) { return ($resp.Content | ConvertFrom-Json) }
-  } catch { }
-  return $null
+    if ($resp.StatusCode -eq 200) {
+      try { return @{ Kind = 'ok'; State = ($resp.Content | ConvertFrom-Json) } }
+      catch { return @{ Kind = 'indeterminate'; State = $null } }  # answered but unparsable: still an instance
+    }
+    return @{ Kind = 'indeterminate'; State = $null }
+  } catch {
+    # WebException with a connection-level failure means nothing is listening; anything else (timeout, proxy, TLS) is uncertain.
+    $msg = [string]$_.Exception.Message
+    $status = $null
+    try { if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode } } catch { }
+    if ($status) { return @{ Kind = 'indeterminate'; State = $null } }  # got an HTTP status (e.g. 5xx): instance is up
+    if ($_.Exception -is [System.Net.WebException]) {
+      switch ($_.Exception.Status) {
+        ([System.Net.WebExceptionStatus]::ConnectFailure) { return @{ Kind = 'refused'; State = $null } }
+        ([System.Net.WebExceptionStatus]::NameResolutionFailure) { return @{ Kind = 'unreachable'; State = $null } }
+        ([System.Net.WebExceptionStatus]::HostNotFound) { return @{ Kind = 'unreachable'; State = $null } }
+        default { return @{ Kind = 'indeterminate'; State = $null } }
+      }
+    }
+    if ($msg -match 'actively refused|No connection could be made') { return @{ Kind = 'refused'; State = $null } }
+    return @{ Kind = 'indeterminate'; State = $null }
+  }
 }
 
 # --- Actions --------------------------------------------------------------------------------
@@ -145,12 +176,20 @@ function Start-Service2 {
 
   # No matching command line was found, but an instance may still be serving this URL (started another way). Probe the
   # management API before touching the lock or launching a second process against the same state directory and port.
-  if ($null -ne (Invoke-State)) {
+  # Only proceed when the probe proves nothing answers here (connection refused / unreachable). An answered or an
+  # indeterminate probe (timeout, 5xx, bad JSON) means an instance MAY be up: refuse and keep the lock rather than deleting
+  # a live instance's lock (which would make proper-lockfile's onCompromised abort it) and starting a duplicate.
+  $probe = Get-StateProbe
+  if ($probe.Kind -eq 'ok') {
     Write-Host "An instance already answers at $BaseUrl but was not launched by this script; refusing to start a second." -ForegroundColor Red
     return (Status-Service2)
   }
+  if ($probe.Kind -eq 'indeterminate') {
+    Write-Host "Could not confirm that nothing serves $BaseUrl (indeterminate probe). Refusing to start or delete the lock; retry when the endpoint is reachable." -ForegroundColor Red
+    return 1
+  }
 
-  # Remove a stale proper-lockfile lock left by an abrupt kill; safe because no process runs this profile now.
+  # The probe proved nothing answers (refused/unreachable): safe to remove a stale proper-lockfile lock.
   # proper-lockfile locks the state directory itself, creating `<stateDir>.lock`, so the path follows $StateDir (not the profile name).
   $lock = "$StateDir.lock"
   if (Test-Path $lock) { Remove-Item -Recurse -Force $lock -ErrorAction SilentlyContinue }

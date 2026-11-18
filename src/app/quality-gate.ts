@@ -116,18 +116,25 @@ export const CODE_EXTENSIONS: ReadonlySet<string> = new Set([
   'hs', 'ml', 'mli', 'zig', 'nim', 'sol', 'asm', 's', 'sh', 'bash', 'zsh', 'ps1', 'psm1',
   'sql', 'graphql', 'gql', 'proto', 'thrift', 'css', 'scss', 'sass', 'less', 'styl',
   'html', 'htm', 'xml', 'xsl', 'xslt', 'jinja', 'j2', 'ejs', 'hbs', 'mustache', 'tf', 'tfvars',
+  // Manifests, lockfiles and CI/config that carry gate-relevant risk (a dependency bump or CI rewrite is a classic bypass):
+  'json', 'json5', 'jsonc', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'env', 'lock',
+  'mod', 'sum', 'gradle', 'cmake', 'mk', 'bzl', 'nix', 'csproj', 'sln', 'fsproj', 'vbproj', 'props', 'targets',
 ])
 
+/** File names (basename, extensionless or dotted variants) that always count as code regardless of extension. */
+const CODE_BASENAMES = /^(Makefile|makefile|GNUmakefile|Dockerfile|Containerfile|Rakefile|Gemfile|Procfile|Jenkinsfile|Vagrantfile|Brewfile|CMakeLists\.txt|\.gitlab-ci\.yml|\.env|\.dockerignore|\.gitignore|\.npmrc|\.nvmrc)$/i
+
 /**
- * Whether a changed path is a code file. Straightforward extension test; extensionless files (Makefile, Dockerfile) count
- * only when their basename is a known build script, so a docs-only change does not drag them in.
+ * Whether a changed path is a code file. Extension test, plus known build/CI basenames and `Dockerfile.<tag>` /
+ * `docker-compose.<x>.yml` style names, so a docs-only change does not drag them in but a manifest/CI change still reviews.
  */
 export function isCodePath(path: string): boolean {
   const name = path.split(/[\\/]/).pop() ?? path
   const dot = name.lastIndexOf('.')
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
   if (ext && CODE_EXTENSIONS.has(ext)) return true
-  return /^(Makefile|Dockerfile|Rakefile|Gemfile|Procfile|Jenkinsfile)$/i.test(name)
+  if (CODE_BASENAMES.test(name)) return true
+  return /^(Dockerfile|Containerfile|docker-compose|compose)(\.[\w.-]+)?$/i.test(name)
 }
 
 /** Whether any changed path is a code file; an empty list is not a code change. */

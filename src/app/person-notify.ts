@@ -149,7 +149,12 @@ export class PersonNotify {
     for (const item of pending) {
       if (signal.aborted) break
       const failed = this.failures.get(item.key) ?? 0
-      if (failed >= MAX_SEND_FAILURES) continue
+      if (failed >= MAX_SEND_FAILURES) {
+        // This need was abandoned after the failure cap, but it is still unannounced and live: keep the slot in `error` so the
+        // health board does not read healthy while a person is never told. It retries once the need (ticket/action) changes.
+        failedThisPass = true
+        continue
+      }
       try {
         await this.send(robotCode, recipients, this.compose(item.ticket, { kind: 'decision', action: item.action }))
       } catch (error) {
