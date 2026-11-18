@@ -90,7 +90,22 @@ describe('PersonNotify scan', () => {
     // A later ended ticket will not be re-announced.
     await h.notify['scan'](ac().signal)
     expect(h.sent).toHaveLength(1)
-    expect(h.store.get(KV.personNotify.ended)![ticket().id]).toBeTruthy()
+    expect(h.store.get(KV.personNotify.ended)![`${ticket().id}:`]).toBeTruthy()
+  })
+
+  it('does not re-announce trimmed results once the map exceeds its cap (notification-storm regression)', async () => {
+    // More ended tickets than ENDED_KEEP (500) would previously evict old ids and re-send them every pass forever.
+    const many: Ticket[] = []
+    for (let i = 0; i < 620; i++) many.push(ticket({ id: `t-${i}`, ended: { at: new Date(2026, 0, 1, 0, 0, i).toISOString(), by: 'human', outcome: 'completed' } }))
+    const h = mk(many)
+    await h.notify['scan'](ac().signal)
+    const firstPass = h.sent.length
+    expect(firstPass).toBe(620)
+    // The cap keeps the map bounded, and further passes must not resurrect any trimmed ticket as a duplicate send.
+    await h.notify['scan'](ac().signal)
+    await h.notify['scan'](ac().signal)
+    expect(h.sent.length).toBe(firstPass)
+    expect(Object.keys(h.store.get(KV.personNotify.ended)!).length).toBeLessThanOrEqual(500)
   })
 
   it('announces both a decision and a result across passes without duplication', async () => {

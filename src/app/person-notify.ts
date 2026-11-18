@@ -175,11 +175,21 @@ export class PersonNotify {
   private async scanResults(robotCode: string, recipients: string[], signal: AbortSignal): Promise<boolean> {
     const announced = this.host.store.get(KV.personNotify.ended) ?? {}
     const next: Record<string, string> = { ...announced }
+    // A ticket ending at or before the stored watermark was already announced (or predates this feature), so trimming the
+    // map by count can never resurrect an old result as a duplicate push. A resume that ends a ticket again yields a newer
+    // `ended.at` and so crosses the watermark, announcing exactly once. Filter against the watermark read at pass start (not
+    // one advanced mid-pass): the store lists newest-first, so advancing it per-send would wrongly skip every older ticket.
+    const storedWatermark = this.host.store.get(KV.personNotify.endedWatermark) ?? ''
+    let newWatermark = storedWatermark
+    let watermarkMoved = false
     let failedThisPass = false
     for (const ticket of this.host.store.tickets.list()) {
       if (signal.aborted) break
       if (!ticket.ended) continue
-      if (announced[ticket.id]) continue
+      const endedAt = ticket.ended.at ?? ''
+      const key = `${ticket.id}:${endedAt}`
+      if (announced[key]) continue
+      if (endedAt && endedAt <= storedWatermark) continue
       try {
         await this.send(robotCode, recipients, this.compose(ticket, { kind: 'result' }))
       } catch (error) {
@@ -189,13 +199,16 @@ export class PersonNotify {
         this.host.report(detail)
         continue
       }
-      next[ticket.id] = new Date().toISOString()
+      next[key] = new Date().toISOString()
+      if (endedAt > newWatermark) { newWatermark = endedAt; watermarkMoved = true }
     }
-    if (Object.keys(next).length !== Object.keys(announced).length) {
-      // Bound the map: keep the most recently announced results so it cannot grow without limit.
-      const entries = Object.entries(next).sort((a, b) => a[1].localeCompare(b[1])).slice(-ENDED_KEEP)
-      this.host.store.set(KV.personNotify.ended, Object.fromEntries(entries))
-    }
+    // Bound the map by count: safe now, because the watermark stops any trimmed (older) id from being re-announced.
+    const entries = Object.entries(next).sort((a, b) => a[1].localeCompare(b[1])).slice(-ENDED_KEEP)
+    const nextMap = Object.fromEntries(entries)
+    const changed = Object.keys(nextMap).length !== Object.keys(announced).length
+      || Object.keys(nextMap).some(key => nextMap[key] !== announced[key])
+    if (changed) this.host.store.set(KV.personNotify.ended, nextMap)
+    if (watermarkMoved) this.host.store.set(KV.personNotify.endedWatermark, newWatermark)
     return failedThisPass
   }
 

@@ -436,17 +436,32 @@ export class QualityGate {
     return candidates[0]?.sha ?? ''
   }
 
-  /** Paths changed in `base..HEAD`, plus any uncommitted working-tree changes, so a docs-only ticket is detected before any review. */
-  private async changedFiles(directory: string, base: string): Promise<string[]> {
+  /**
+   * Paths changed in `base..HEAD`, plus any uncommitted working-tree changes, so a docs-only ticket is detected before any
+   * review. Returns `undefined` when the committed diff cannot be computed (no base, or the `git diff` failed), so a caller
+   * never mistakes an unknown diff for "no committed code change" and masks a `base_unresolved` setup fault as a clean pass.
+   */
+  private async changedFiles(directory: string, base: string): Promise<string[] | undefined> {
+    if (!base) return undefined
+    // `-c core.quotePath=false` keeps non-ASCII paths literal instead of octal-quoted, so the extension test below is reliable.
+    const git = (args: string[]) => this.run('git', ['-c', 'core.quotePath=false', '-C', directory, ...args], directory)
     const paths = new Set<string>()
-    if (base) {
-      const committed = await this.run('git', ['-C', directory, 'diff', '--name-only', `${base}..HEAD`], directory).catch(() => '')
-      for (const line of committed.split('\n')) { const p = line.trim(); if (p) paths.add(p) }
+    let committed: string
+    try {
+      committed = await git(['diff', '--name-only', `${base}..HEAD`])
+    } catch {
+      // The diff itself failed (e.g. a bogus base); report unknown rather than an empty change set.
+      return undefined
     }
+    for (const line of committed.split('\n')) { const p = line.trim(); if (p) paths.add(p) }
     // A worker may still hold uncommitted edits at `ready`; include them so an untracked code file is not missed.
-    const status = await this.run('git', ['-C', directory, 'status', '--porcelain'], directory).catch(() => '')
+    // `ls-files --others` lists individual untracked files (not a collapsed `dir/` entry), so a whole new code directory counts.
+    const untracked = await git(['ls-files', '--others', '--exclude-standard']).catch(() => '')
+    for (const line of untracked.split('\n')) { const p = line.trim(); if (p) paths.add(p) }
+    const status = await git(['status', '--porcelain']).catch(() => '')
     for (const line of status.split('\n')) {
-      const entry = line.slice(3).trim(); if (entry) paths.add(entry.split(' -> ').pop() ?? entry)
+      // Renames/copies show `old -> new`; take the destination. Skip `??` untracked (already covered by ls-files above).
+      const entry = line.slice(3).trim(); if (entry && !line.startsWith('??')) paths.add(entry.split(' -> ').pop() ?? entry)
     }
     return [...paths]
   }
@@ -484,9 +499,10 @@ export class QualityGate {
     // the normal path so a genuine setup fault still surfaces as `no_git_repository`.
     if (!location.error) {
       const files = await this.changedFiles(location.directory, location.base)
-      // Only skip on a known, non-empty change set that has no code file: an empty or unavailable diff falls through so a real
-      // setup fault and a genuinely empty change both keep their existing outcomes.
-      if (files.length > 0 && !hasCodeChanges(files)) {
+      // Only skip on a known, non-empty change set that has no code file: an unknown diff (undefined), an empty diff, or an
+      // unresolved base falls through so a real setup fault (`base_unresolved`) and a genuinely empty change keep their
+      // existing fail-closed outcomes rather than being masked as a clean pass.
+      if (files && files.length > 0 && !hasCodeChanges(files)) {
         const fingerprint = fingerprintOf(['no_code_change', location.directory, location.base, head, clean(dirty), files.sort().join(',')])
         const receipt: Receipt = { fingerprint, base: location.base, head, at: new Date().toISOString(), outcome: 'skipped',
           reason: 'no_code_change', blocking: 0, counts: { critical: 0, high: 0, medium: 0, low: 0 }, deterministic: [], findings: [],

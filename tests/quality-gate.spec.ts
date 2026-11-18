@@ -376,6 +376,29 @@ describe('fixes 1-4', () => {
     } finally { rmSync(d, { recursive: true, force: true }) }
   })
 
+  it('2: an unresolved base with only a docs working-tree edit is NOT masked as a clean no-code-change pass', async () => {
+    const d = root(); try {
+      const repo = join(d, 'repo'); mkdirSync(join(repo, '.git'), { recursive: true })
+      // name-only would report only a docs file; status shows an uncommitted docs edit. Before the fix, the code-change guard
+      // saw files.length>0 && no code and returned a clean `no_code_change` pass even though the committed diff is unknown.
+      const run: RunFn = async (program, args, cwd) => {
+        if (program === 'git') {
+          if (args.includes('rev-parse') && args.includes('--show-toplevel')) { if (cwd === repo) return cwd; throw new Error('not a repo') }
+          if (args.includes('rev-parse')) return 'headsha'
+          if (args.includes('merge-base')) return '' // base unresolved
+          if (args.includes('status')) return ' M README.md\n'
+          if (args.includes('diff') && args.includes('--name-only')) return 'README.md\n'
+          return ''
+        }
+        return ''
+      }
+      const v = await new QualityGate(run).check({ ticket: childTicket(d), config: config({ mode: 'enforce' }), attempts: 0, receiptDir: d })
+      expect(v.receipt.reason).toBe('base_unresolved')
+      expect(v.pass).toBe(false) // fail-closed, not a clean skip
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
+
+
   it('2: a review with no derivable base is not silently downgraded to workspace mode', async () => {
     const d = root(); try {
       const repo = join(d, 'repo'); mkdirSync(join(repo, '.git'), { recursive: true })

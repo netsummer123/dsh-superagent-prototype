@@ -95,10 +95,13 @@ function Get-RecordedPid {
   return $null
 }
 
-# All Node processes whose command line runs this profile.
+# All Node processes whose command line runs this profile. The profile name is matched as a whole token after `--profile`
+# (anchored by a following whitespace, quote, or end of line) and regex-escaped, so `--profile superagent` never matches
+# `--profile superagent-dev` or `--profile superagent2`, and a `*`/`?`/`[` in the name is treated literally.
 function Get-SuperagentProcesses {
+  $pattern = "--profile\s+$([regex]::Escape($Profile))(\s|$|`"|')"
   Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like "*--profile $Profile*" } |
+    Where-Object { $_.CommandLine -and $_.CommandLine -match $pattern } |
     ForEach-Object { [pscustomobject]@{ Id = [int]$_.ProcessId; CommandLine = $_.CommandLine } }
 }
 
@@ -125,7 +128,8 @@ function Start-Service2 {
   }
 
   # Remove a stale proper-lockfile lock left by an abrupt kill; safe because no process runs this profile now.
-  $lock = Join-Path (Split-Path $StateDir -Parent) "$Profile.lock"
+  # proper-lockfile locks the state directory itself, creating `<stateDir>.lock`, so the path follows $StateDir (not the profile name).
+  $lock = "$StateDir.lock"
   if (Test-Path $lock) { Remove-Item -Recurse -Force $lock -ErrorAction SilentlyContinue }
 
   $stamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
@@ -168,7 +172,7 @@ function Stop-Service2 {
   while ((Get-Date) -lt $deadline -and (Test-PortListening)) { Start-Sleep -Milliseconds 500 }
   Remove-Item $PidFile -ErrorAction SilentlyContinue
   # Clear the lock a hard kill may leave behind.
-  $lock = Join-Path (Split-Path $StateDir -Parent) "$Profile.lock"
+  $lock = "$StateDir.lock"
   if (Test-Path $lock) { Remove-Item -Recurse -Force $lock -ErrorAction SilentlyContinue }
   Write-Host 'Stopped.' -ForegroundColor Green
   return 0
