@@ -186,15 +186,25 @@ function Start-Service2 {
 function Stop-Service2 {
   $procs = @(Get-SuperagentProcesses)
   if ($procs.Count -eq 0) { Write-Host 'Not running.' -ForegroundColor Yellow; Remove-Item $PidFile -ErrorAction SilentlyContinue; return 0 }
+  $failed = $false
   foreach ($proc in $procs) {
     Write-Host "Stopping pid $($proc.Id) ..."
-    try { Stop-Process -Id $proc.Id -Force -ErrorAction Stop } catch { Write-Host "  could not stop $($proc.Id): $_" -ForegroundColor Red }
+    try { Stop-Process -Id $proc.Id -Force -ErrorAction Stop } catch { Write-Host "  could not stop $($proc.Id): $_" -ForegroundColor Red; $failed = $true }
   }
   # Wait for the port to free.
   $deadline = (Get-Date).AddSeconds(30)
   while ((Get-Date) -lt $deadline -and (Test-PortListening)) { Start-Sleep -Milliseconds 500 }
+  # A kill may have failed (access denied, protected/elevated process) or a process may still be shutting down and holding
+  # the port. In that case the service is still up: keep the PID file and the live instance's lock, and fail, rather than
+  # deleting the lock of a running instance (which makes proper-lockfile's onCompromised abort it) and falsely reporting success.
+  $survivors = @(Get-SuperagentProcesses)
+  $portBusy = Test-PortListening
+  if ($failed -or $survivors.Count -gt 0 -or $portBusy) {
+    Write-Host "Stop did not finish: $(if ($failed) {'a process could not be killed; '})$($survivors.Count) still match$(if ($portBusy) {', port still listening'}). Kept the PID file and lock." -ForegroundColor Red
+    return 1
+  }
   Remove-Item $PidFile -ErrorAction SilentlyContinue
-  # Clear the lock a hard kill may leave behind.
+  # Clear the lock a hard kill may leave behind (only now that nothing serves the profile).
   $lock = "$StateDir.lock"
   if (Test-Path $lock) { Remove-Item -Recurse -Force $lock -ErrorAction SilentlyContinue }
   Write-Host 'Stopped.' -ForegroundColor Green
