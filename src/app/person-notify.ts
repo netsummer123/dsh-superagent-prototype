@@ -1,9 +1,11 @@
 /**
- * Person notifications: a background loop that scans Tickets and, when one enters a stage that waits on a person
- * (review, answer, delivery, blocked or failed), sends one DingTalk robot message per (ticket, action) so the operator
- * is told what needs a human. Deduplicated through KV so a need is announced once and never repeats each tick or restart.
+ * Person notifications: a background loop that scans Tickets and pushes one DingTalk robot message when either
+ *  (a) a Ticket enters a stage that waits on a person (review, answer, delivery, blocked or failed) — a decision push, or
+ *  (b) a Ticket finishes — a result push.
+ * Both carry the ticket's key points (outcome, PR/branch, the latest summary or open question) rather than a bare "someone
+ * needs you". Deduplicated through KV so each need/result is announced once and never repeats per tick or restart.
  */
-import type { Ticket } from '../core/index.ts'
+import type { Ticket, TicketOutcome } from '../core/index.ts'
 import { ticketStage } from '../core/index.ts'
 import { KV } from '../kv.ts'
 import type { Commands } from '../infra/commands.ts'
@@ -18,6 +20,8 @@ const MAX_SEND_FAILURES = 5
 const DEFAULT_APP_NAME = 'super-agent'
 /** Truncation limit (characters) for a report summary inside the DingTalk text body. */
 const SUMMARY_MAX = 300
+/** The ended-announcement map is bounded so it cannot grow without limit across a long deployment. */
+const ENDED_KEEP = 500
 
 type PersonAction = 'review' | 'answer' | 'delivery' | 'blocked' | 'failed'
 /** What a person must do, in the words the DingTalk message uses. */
@@ -27,6 +31,14 @@ const ACTION_HINT: Record<PersonAction, string> = {
   delivery: '有一条回复投递失败，需要处理',
   blocked: '执行受阻，需要你处理',
   failed: '执行失败，需要你处理',
+}
+/** How a finished ticket ended, in the words the result push uses. */
+const OUTCOME_HINT: Record<TicketOutcome, string> = {
+  completed: '已完成',
+  merged: '已完成并合并',
+  closed: 'PR 已关闭（未合并）',
+  dropped: '已放弃（无事可做）',
+  stopped: '已被人工停止',
 }
 
 /** Dependencies the loop needs from the runtime; kept narrow so it stays a leaf module. */
@@ -43,10 +55,50 @@ export interface PersonNotifyHost {
   appName?(): string | undefined
 }
 
+/** The latest report a worker filed on the ticket, if any. */
+function latestReport(ticket: Ticket): { state: string; summary: string } | undefined {
+  return ticket.assignments.findLast(a => a.report)?.report
+}
+
+/** The PR/thread the ticket follows (its pull request), if the Source recorded one. */
+function prRef(ticket: Ticket): string | undefined {
+  const follow = ticket.follows?.find(item => item.own) ?? ticket.follows?.[0]
+  if (!follow) return undefined
+  const thread = follow.thread
+  // A thread is a Source-specific PR reference; keep the trailing number or the whole ref, whichever reads best.
+  return thread
+}
+
 /**
- * Runs the person-notification loop until `signal` aborts. Each pass reads every live ticket, computes its stage, and for
- * each `person`-stage ticket whose (id, action) is not yet announced, sends one DingTalk message to every allowed operator
- * and records the key. Records are pruned to live needs so the map stays bounded.
+ * The key points of a ticket, one `label：value` line each: what happened (outcome or action), the PR/branch, and the latest
+ * summary or the open question. Shared by the decision and result pushes so both tell the operator what matters.
+ */
+export function keyPoints(ticket: Ticket, opts: { kind: 'decision'; action: PersonAction } | { kind: 'result' }): string[] {
+  const lines: string[] = []
+  if (opts.kind === 'result') {
+    const outcome = ticket.ended?.outcome
+    lines.push(`结果：${outcome ? OUTCOME_HINT[outcome] : '已结束'}`)
+    if (ticket.ended?.reason) lines.push(`说明：${ticket.ended.reason.slice(0, SUMMARY_MAX)}`)
+  } else {
+    lines.push(`需要你：${ACTION_HINT[opts.action]}`)
+    const question = ticket.attention?.question
+    if (question) lines.push(`问题：${question.slice(0, SUMMARY_MAX)}`)
+    if (ticket.delivery?.error) lines.push(`投递错误：${ticket.delivery.error.slice(0, SUMMARY_MAX)}`)
+  }
+  lines.push(`工单：${ticket.title}`)
+  const pr = prRef(ticket)
+  if (pr) lines.push(`PR/分支：${pr}`)
+  if (ticket.execution?.name) lines.push(`执行名：${ticket.execution.name}`)
+  const report = latestReport(ticket)
+  if (report?.summary) lines.push(`摘要：${report.summary.slice(0, SUMMARY_MAX)}`)
+  return lines
+}
+
+/**
+ * Runs the person-notification loop until `signal` aborts. Each pass reads every ticket and pushes:
+ *  - one decision message per `person`-stage ticket whose (id, action) is not yet announced, and
+ *  - one result message per ended ticket whose id is not yet announced.
+ * Deduplicated through two KV maps (person needs pruned to live needs; ended results bounded to the most recent).
  */
 export class PersonNotify {
   private timer: ReturnType<typeof setTimeout> | undefined
@@ -70,9 +122,19 @@ export class PersonNotify {
     if (!bot) { this.host.ok?.(); return }
     const recipients = (this.host.store.settings().policy.sources.dingtalk?.allowed ?? []).map(entry => entry.id).filter(Boolean)
     if (!recipients.length) { this.host.ok?.(); return }
+    const robotCode = bot.robotCode || bot.appKey
+    let failedThisPass = false
+    // 1) Decision pushes: tickets waiting on a person, deduped by (id, action).
+    if (await this.scanDecisions(robotCode, recipients, signal)) failedThisPass = true
+    // 2) Result pushes: tickets that finished, deduped by id.
+    if (await this.scanResults(robotCode, recipients, signal)) failedThisPass = true
+    // Only report the slot healthy after a pass with no failed send: a giving-up error must stay visible.
+    if (!failedThisPass) this.host.ok?.()
+  }
+
+  /** Send one message per new person-stage need; returns true if any send failed this pass. */
+  private async scanDecisions(robotCode: string, recipients: string[], signal: AbortSignal): Promise<boolean> {
     const announced = this.host.store.get(KV.personNotify.notified) ?? {}
-    // Build the full next map from every live, person-stage ticket first: keep records already announced, and queue new
-    // needs. Seeding from `announced` up front means the map is complete even if a send fails or the pass is cut short.
     const next: Record<string, string> = {}
     const pending: { key: string; ticket: Ticket; action: PersonAction }[] = []
     for (const ticket of this.host.store.tickets.list()) {
@@ -84,18 +146,14 @@ export class PersonNotify {
       else pending.push({ key, ticket, action: stage.action })
     }
     const live = new Set(pending.map(item => item.key))
-    // Forget failure counts for needs that are gone, so a fresh need for the same ticket:action can be announced again.
     for (const key of this.failures.keys()) if (!live.has(key)) this.failures.delete(key)
-    // Send each new need on its own: one failing send is reported and skipped (retried next pass) without silencing the rest
-    // or re-announcing those already recorded. Stop between sends if the runtime is shutting down, but still persist the map.
     let failedThisPass = false
     for (const item of pending) {
       if (signal.aborted) break
       const failed = this.failures.get(item.key) ?? 0
-      // A need past the cap is left for good until its count is pruned when the need is gone; do not resend it.
       if (failed >= MAX_SEND_FAILURES) continue
       try {
-        await this.send(bot.robotCode || bot.appKey, recipients, item.ticket, item.action)
+        await this.send(robotCode, recipients, this.compose(item.ticket, { kind: 'decision', action: item.action }))
       } catch (error) {
         failedThisPass = true
         const count = failed + 1
@@ -107,26 +165,54 @@ export class PersonNotify {
       this.failures.delete(item.key)
       next[item.key] = new Date().toISOString()
     }
-    // Persist the whole map once, comparing key/value sets (not text order), so an idle tick writes nothing.
     const changed = Object.keys(next).length !== Object.keys(announced).length
       || Object.keys(next).some(key => next[key] !== announced[key])
     if (changed) this.host.store.set(KV.personNotify.notified, next)
-    // Only report the slot healthy after a pass with no failed send: a giving-up error set above must stay visible.
-    if (!failedThisPass) this.host.ok?.()
+    return failedThisPass
   }
 
-  private async send(robotCode: string, userIds: string[], ticket: Ticket, action: PersonAction): Promise<void> {
-    // The latest report's own summary, or the open question, tells the person what happened.
-    const report = ticket.assignments.findLast(a => a.report)?.report
-    const summary = report?.summary ?? ticket.attention?.question ?? ''
+  /** Send one message per newly ended ticket; returns true if any send failed this pass. */
+  private async scanResults(robotCode: string, recipients: string[], signal: AbortSignal): Promise<boolean> {
+    const announced = this.host.store.get(KV.personNotify.ended) ?? {}
+    const next: Record<string, string> = { ...announced }
+    let failedThisPass = false
+    for (const ticket of this.host.store.tickets.list()) {
+      if (signal.aborted) break
+      if (!ticket.ended) continue
+      if (announced[ticket.id]) continue
+      try {
+        await this.send(robotCode, recipients, this.compose(ticket, { kind: 'result' }))
+      } catch (error) {
+        failedThisPass = true
+        // Results are terminal: retry next pass (no per-key failure cap needed), but do not record on failure.
+        const detail = `person-notify: send result ${ticket.id}: ${error instanceof Error ? error.message : String(error)}`
+        this.host.report(detail)
+        continue
+      }
+      next[ticket.id] = new Date().toISOString()
+    }
+    if (Object.keys(next).length !== Object.keys(announced).length) {
+      // Bound the map: keep the most recently announced results so it cannot grow without limit.
+      const entries = Object.entries(next).sort((a, b) => a[1].localeCompare(b[1])).slice(-ENDED_KEEP)
+      this.host.store.set(KV.personNotify.ended, Object.fromEntries(entries))
+    }
+    return failedThisPass
+  }
+
+  /** Build the DingTalk `sampleText` body for a ticket: a headline plus its key points and the panel link. */
+  private compose(ticket: Ticket, kind: { kind: 'decision'; action: PersonAction } | { kind: 'result' }): string {
     const app = this.host.appName?.() ?? DEFAULT_APP_NAME
     const panel = this.host.panelUrl?.()
-    const content = [
-      `【${app}】有工单需要你处理：${ACTION_HINT[action]}`,
-      `工单：${ticket.title}`,
-      summary ? `进度：${summary.slice(0, SUMMARY_MAX)}` : '',
+    const head = kind.kind === 'result' ? '有一条工单已出结果' : '有工单需要你处理'
+    const points = keyPoints(ticket, kind)
+    return [
+      `【${app}】${head}`,
+      ...points.map(line => `· ${line}`),
       panel ? `请在面板「${app} → 概览」查看：${panel}` : '',
     ].filter(Boolean).join('\n')
+  }
+
+  private async send(robotCode: string, userIds: string[], content: string): Promise<void> {
     await this.host.commands.dingtalk('/v1.0/robot/oToMessages/batchSend', {
       robotCode, userIds, msgKey: 'sampleText', msgParam: JSON.stringify({ content }),
     })

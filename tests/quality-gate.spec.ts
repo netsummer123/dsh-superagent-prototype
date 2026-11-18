@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { adaptiveBudget, budgetExceeded, countBlocking, coverageCount, decide, gateApplies, ocrEnvironment, parseOcrResult, QualityGate,
+import { adaptiveBudget, budgetExceeded, countBlocking, coverageCount, decide, gateApplies, hasCodeChanges, isCodePath, ocrEnvironment, parseOcrResult, QualityGate,
   reviewerUnavailable, summaryLine, type Receipt, type RunFn } from '../src/app/quality-gate.ts'
 import { QualityGateConfigSchema } from '../src/policy.ts'
 import type { Ticket } from '../src/core/index.ts'
@@ -13,6 +13,8 @@ const config = (over: Partial<ReturnType<typeof QualityGateConfigSchema.parse>> 
 function fakeRun(routes: { git?: Record<string, string>; ocr?: (args: string[]) => string; onOcr?: (args: string[], env?: Record<string, string>) => void }): RunFn {
   return async (program, args, _cwd, env) => {
     if (program === 'git') {
+      // `--name-only` feeds the code-change guard; default to one code file so the existing tests still reach `produce`.
+      if (args.includes('--name-only')) return routes.git?.names ?? 'src/a.ts'
       const key = args.includes('rev-parse') ? 'head' : args.includes('status') ? 'status' : args.includes('diff') ? 'diff' : 'other'
       return routes.git?.[key] ?? ''
     }
@@ -259,6 +261,7 @@ function repoRun(opts: { repoDir: string | string[]; hasBase?: boolean; ocr?: (a
       if (args.includes('log')) return cwd.endsWith('repo') ? '1700000000' : '1600000000'
       if (args.includes('merge-base')) return opts.hasBase === false ? '' : 'abc123def4567890'
       if (args.includes('status')) return ''
+      if (args.includes('diff') && args.includes('--name-only')) return 'app.js\n'
       if (args.includes('diff') && args.includes('--numstat')) return '100\t20\tapp.js\n'
       if (args.includes('diff')) return '+  const x = 1\n'
       return ''
@@ -340,14 +343,36 @@ describe('fixes 1-4', () => {
     } finally { rmSync(d, { recursive: true, force: true }) }
   })
 
-  it('1: a ticket directory with no repository at all is recorded, never silently passed', async () => {
+  it('1: with onNoRepository=skip (default), a workspace and all descendants without git skip cleanly', async () => {
     const d = root(); try {
       const v = await new QualityGate(repoRun({ repoDir: join(d, 'repo') }))
-        .check({ ticket: childTicket(d), config: config({ mode: 'observe' }), attempts: 0, receiptDir: d })
-      expect(v.receipt.reason).toBe('no_git_repository')
+        .check({ ticket: childTicket(d), config: config({ mode: 'enforce' }), attempts: 0, receiptDir: d })
+      expect(v.receipt.reason).toBe('no_repository_skipped')
       expect(v.receipt.outcome).toBe('skipped')
+      expect(reviewerUnavailable(v.receipt)).toBe(false)
+      expect(v.pass).toBe(true)
+      expect(v.blocksHandover).toBe(false)
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
+
+  it('1: with onNoRepository=block, a workspace without git is a fail-closed setup fault', async () => {
+    const d = root(); try {
+      const v = await new QualityGate(repoRun({ repoDir: join(d, 'repo') }))
+        .check({ ticket: childTicket(d), config: config({ mode: 'enforce', onNoRepository: 'block' }), attempts: 0, receiptDir: d })
+      expect(v.receipt.reason).toBe('no_git_repository')
       expect(reviewerUnavailable(v.receipt)).toBe(true)
-      expect(v.receipt.head).toBe('')
+      expect(v.pass).toBe(false)
+      expect(v.blocksHandover).toBe(true)
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
+
+  it('1: finds a git repository nested deep below the ticket directory (not only 2 levels)', async () => {
+    const d = root(); try {
+      const repo = join(d, 'a', 'b', 'c', 'repo'); mkdirSync(join(repo, '.git'), { recursive: true })
+      const gate = new QualityGate(repoRun({ repoDir: repo }))
+      const v = await gate.check({ ticket: childTicket(d), config: config({ mode: 'observe' }), attempts: 0, receiptDir: d })
+      expect(v.receipt.repository).toBe(repo)
+      expect(v.receipt.outcome).toBe('reviewed')
     } finally { rmSync(d, { recursive: true, force: true }) }
   })
 
@@ -363,9 +388,9 @@ describe('fixes 1-4', () => {
 
   it('4: an unavailable reviewer blocks handover even in observe, while findings stay shadow-only', async () => {
     const d = root(); try {
-      // Unavailable: no repo at all.
+      // Unavailable: no repo at all (with onNoRepository=block so it stays fail-closed), in observe mode.
       const blocked = await new QualityGate(repoRun({ repoDir: join(d, 'repo') }))
-        .check({ ticket: childTicket(d), config: config({ mode: 'observe' }), attempts: 0, receiptDir: d })
+        .check({ ticket: childTicket(d), config: config({ mode: 'observe', onNoRepository: 'block' }), attempts: 0, receiptDir: d })
       expect(blocked.pass).toBe(false)
       expect(blocked.unavailable).toBe(true)
       expect(blocked.blocksHandover).toBe(true)
@@ -383,9 +408,49 @@ describe('fixes 1-4', () => {
 
       // Explicit opt-out still allows a pass when the reviewer is unavailable.
       const optedOut = await new QualityGate(repoRun({ repoDir: join(d, 'none') }))
-        .check({ ticket: childTicket(d), config: config({ mode: 'observe', onUnavailable: 'pass' }), attempts: 0, receiptDir: d })
+        .check({ ticket: childTicket(d), config: config({ mode: 'observe', onUnavailable: 'pass', onNoRepository: 'block' }), attempts: 0, receiptDir: d })
       expect(optedOut.pass).toBe(true)
       expect(optedOut.blocksHandover).toBe(false)
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
+})
+
+describe('code-change guard', () => {
+  it('isCodePath treats source files and build scripts as code, docs/config as not', () => {
+    expect(isCodePath('src/app/x.ts')).toBe(true)
+    expect(isCodePath('a\\b\\Main.java')).toBe(true)
+    expect(isCodePath('Makefile')).toBe(true)
+    expect(isCodePath('Dockerfile')).toBe(true)
+    expect(isCodePath('README.md')).toBe(false)
+    expect(isCodePath('docs/guide.mdx')).toBe(false)
+    expect(isCodePath('assets/logo.png')).toBe(false)
+    expect(hasCodeChanges(['README.md', 'docs/a.md'])).toBe(false)
+    expect(hasCodeChanges(['README.md', 'src/a.py'])).toBe(true)
+  })
+
+  it('skips review (clean pass) when the diff touches only non-code files, without calling ocr', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'qg-'))
+    try {
+      const ocr = vi.fn(() => JSON.stringify({ status: 'complete', comments: [] }))
+      const gate = new QualityGate(fakeRun({ git: { head: 'h', status: '', names: 'README.md\ndocs/guide.md\n' }, ocr }))
+      const v = await gate.check({ ticket: ticket(), config: config({ mode: 'enforce' }), attempts: 0, receiptDir: d })
+      expect(v.pass).toBe(true)
+      expect(v.blocksHandover).toBe(false)
+      expect(v.receipt.reason).toBe('no_code_change')
+      expect(v.summary).toContain('跳过')
+      expect(ocr).not.toHaveBeenCalled()
+    } finally { rmSync(d, { recursive: true, force: true }) }
+  })
+
+  it('runs the review when the diff contains a code file', async () => {
+    const d = mkdtempSync(join(tmpdir(), 'qg-'))
+    try {
+      const ocr = vi.fn(() => JSON.stringify({ status: 'complete', comments: [],
+        manifest: { terminal_state: 'complete', coverage: { selected: [{}], completed: [{}] }, execution: { ocr_version: 'v1.13.6' } } }))
+      const gate = new QualityGate(fakeRun({ git: { head: 'h', status: '', names: 'README.md\nsrc/app/x.ts\n' }, ocr }))
+      const v = await gate.check({ ticket: ticket(), config: config({ mode: 'enforce' }), attempts: 0, receiptDir: d })
+      expect(v.receipt.outcome).toBe('reviewed')
+      expect(ocr).toHaveBeenCalled()
     } finally { rmSync(d, { recursive: true, force: true }) }
   })
 })

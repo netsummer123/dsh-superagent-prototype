@@ -31,6 +31,12 @@ export function QualityGateSettings() {
               options={[{ value: 'block', label: t('qualityGateOnUnavailableBlock') },
                 { value: 'pass', label: t('qualityGateOnUnavailablePass') }]} />
           </Field>
+          <Field label={t('qualityGateOnNoRepository')} hint={t('qualityGateOnNoRepositoryHint')}>
+            <SegmentedControl label={t('qualityGateOnNoRepository')} value={value.onNoRepository}
+              onChange={onNoRepository => edit({ onNoRepository })}
+              options={[{ value: 'skip', label: t('qualityGateOnNoRepositorySkip') },
+                { value: 'block', label: t('qualityGateOnNoRepositoryBlock') }]} />
+          </Field>
           <Field label={t('qualityGateSeverity')} hint={t('qualityGateSeverityHint')}>
             <SegmentedControl label={t('qualityGateSeverity')} value={value.onSeverity} onChange={onSeverity => edit({ onSeverity })}
               options={[{ value: 'critical', label: t('qualityGateSeverityCritical') },

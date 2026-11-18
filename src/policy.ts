@@ -149,6 +149,12 @@ export const QualityGateConfigSchema = z.object({
    * deterministic checks and only records the reason in the report. Only `enforce` mode can block; `observe` never does.
    */
   onUnavailable: z.enum(['block', 'pass']).default('block'),
+  /**
+   * What to do when the ticket's workspace (its directory and every descendant) holds no git repository, so a code-change diff
+   * cannot be computed. `skip` hands the ticket over unreviewed (there is nothing to diff against); `block` treats it as a setup
+   * fault and refuses handover under `enforce`. Defaults to `skip` so a non-git project never deadlocks.
+   */
+  onNoRepository: z.enum(['skip', 'block']).default('skip'),
   ocrVersion: z.string().trim().default('1.13.6'),
   llm: QualityGateLlmSchema.default(() => QualityGateLlmSchema.parse({})),
 }).strict()

@@ -32,7 +32,9 @@ export const KV = {
   /** Runtime: the main Session's ID. */
   runtime: { masterId: record<string>('master-id') },
   /** Person notifications: `ticket:action` -> when it was announced, owned by the PersonNotify loop. */
-  personNotify: { notified: record<Record<string, string>>('person-notified') },
+  personNotify: { notified: record<Record<string, string>>('person-notified'),
+    /** Ended tickets already announced by the PersonNotify loop: `ticketId` -> when its result was pushed. */
+    ended: record<Record<string, string>>('person-ended') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */

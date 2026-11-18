@@ -107,6 +107,32 @@ export interface GateContext {
 /** A receipt that records why the reviewer never ran. All of these are fail-closed candidates, unlike `no_reviewable_files`. */
 export const UNAVAILABLE_REASONS = ['ocr_unavailable', 'no_git_repository', 'base_unresolved'] as const
 
+/** File extensions treated as code, so a diff that only touches docs/config/assets skips the gate instead of spending a review. */
+export const CODE_EXTENSIONS: ReadonlySet<string> = new Set([
+  'ts', 'tsx', 'mts', 'cts', 'js', 'jsx', 'mjs', 'cjs', 'vue', 'svelte',
+  'py', 'rb', 'go', 'rs', 'java', 'kt', 'kts', 'scala', 'groovy', 'clj', 'cljs',
+  'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'hh', 'm', 'mm', 'cs', 'fs', 'vb',
+  'php', 'swift', 'dart', 'lua', 'pl', 'pm', 'r', 'jl', 'ex', 'exs', 'erl', 'hrl',
+  'hs', 'ml', 'mli', 'zig', 'nim', 'sol', 'asm', 's', 'sh', 'bash', 'zsh', 'ps1', 'psm1',
+  'sql', 'graphql', 'gql', 'proto', 'thrift', 'css', 'scss', 'sass', 'less', 'styl',
+  'html', 'htm', 'xml', 'xsl', 'xslt', 'jinja', 'j2', 'ejs', 'hbs', 'mustache', 'tf', 'tfvars',
+])
+
+/**
+ * Whether a changed path is a code file. Straightforward extension test; extensionless files (Makefile, Dockerfile) count
+ * only when their basename is a known build script, so a docs-only change does not drag them in.
+ */
+export function isCodePath(path: string): boolean {
+  const name = path.split(/[\\/]/).pop() ?? path
+  const dot = name.lastIndexOf('.')
+  const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+  if (ext && CODE_EXTENSIONS.has(ext)) return true
+  return /^(Makefile|Dockerfile|Rakefile|Gemfile|Procfile|Jenkinsfile)$/i.test(name)
+}
+
+/** Whether any changed path is a code file; an empty list is not a code change. */
+export const hasCodeChanges = (paths: readonly string[]): boolean => paths.some(isCodePath)
+
 /** Where the review runs and what diff it covers. */
 export interface RepositoryLocation {
   /** Directory used as `cwd` for every git/ocr subprocess. */
@@ -218,7 +244,12 @@ export function summaryLine(receipt: Receipt): string {
   if (reviewerUnavailable(receipt)) return receipt.pass === false
     ? `质量门禁：未通过（审查器不可用：${receipt.reason} · 按配置不得交工 · ${sec}s）`
     : `质量门禁：跳过（审查器不可用：${receipt.reason} · ${sec}s）`
-  if (receipt.outcome === 'skipped') return `质量门禁：跳过（${receipt.reason ?? '无内容'}）`
+  if (receipt.outcome === 'skipped') {
+    const label = receipt.reason === 'no_code_change' ? '未涉及代码变更'
+      : receipt.reason === 'no_repository_skipped' ? '工作区及子目录无 git 仓库'
+      : receipt.reason ?? '无内容'
+    return `质量门禁：跳过（${label}）`
+  }
   const state = receipt.pass ? '通过' : '未通过'
   return `质量门禁：${state}（ocr ${receipt.ocrVersion ?? '?'} · 阻断 ${receipt.blocking} · 覆盖率 ${receipt.coverageText ?? '?'} · ${sec}s）`
 }
@@ -291,21 +322,30 @@ function writeReceipt(dir: string, receipt: Receipt): void {
 /** Strip a command's trailing newline and surrounding whitespace. */
 const clean = (value: string): string => value.trim()
 
-/** Directories one or two levels below `root` that hold a `.git` file or directory. */
+/**
+ * Every directory anywhere below `root` that holds a `.git` entry, plus `root` itself. Searches the whole subtree (not just a
+ * couple of levels) so a repository nested deeper is still found. Hidden directories and `node_modules` are skipped, and the
+ * walk is bounded so a pathological tree cannot spin forever. A `.git` found in a directory stops descent into it: the repo's
+ * own subdirectories are not separate repositories to pick from.
+ */
 function childRepositories(root: string): string[] {
   const candidates: string[] = []
-  const visit = (dir: string, depth: number): void => {
-    if (depth > 2) return
+  if (existsSync(join(root, '.git'))) candidates.push(root)
+  let visited = 0
+  const MAX_DIRS = 4000
+  const visit = (dir: string): void => {
+    if (visited >= MAX_DIRS) return
+    visited++
     let entries: import('node:fs').Dirent[]
     try { entries = readdirSync(dir, { withFileTypes: true }) } catch { return }
     for (const entry of entries) {
       if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue
       const child = join(dir, entry.name)
       if (existsSync(join(child, '.git'))) candidates.push(child)
-      else visit(child, depth + 1)
+      else visit(child)
     }
   }
-  visit(root, 1)
+  visit(root)
   return candidates
 }
 
@@ -396,6 +436,21 @@ export class QualityGate {
     return candidates[0]?.sha ?? ''
   }
 
+  /** Paths changed in `base..HEAD`, plus any uncommitted working-tree changes, so a docs-only ticket is detected before any review. */
+  private async changedFiles(directory: string, base: string): Promise<string[]> {
+    const paths = new Set<string>()
+    if (base) {
+      const committed = await this.run('git', ['-C', directory, 'diff', '--name-only', `${base}..HEAD`], directory).catch(() => '')
+      for (const line of committed.split('\n')) { const p = line.trim(); if (p) paths.add(p) }
+    }
+    // A worker may still hold uncommitted edits at `ready`; include them so an untracked code file is not missed.
+    const status = await this.run('git', ['-C', directory, 'status', '--porcelain'], directory).catch(() => '')
+    for (const line of status.split('\n')) {
+      const entry = line.slice(3).trim(); if (entry) paths.add(entry.split(' -> ').pop() ?? entry)
+    }
+    return [...paths]
+  }
+
   /** Changed lines in `base..HEAD`, used to size the token budget. */
   private async diffLines(directory: string, base: string): Promise<number> {
     if (!base) return 0
@@ -411,8 +466,36 @@ export class QualityGate {
     const ticketDir = ticket.execution!.directory
     const dir = context.receiptDir ?? ticketDir
     const location = await this.locateRepository(context)
+    // No git repository in the workspace or any descendant: no diff can be computed. `onNoRepository=skip` (default) hands the
+    // ticket over unreviewed as a clean skip; `block` keeps it fail-closed as a setup fault via `no_git_repository`.
+    if (location.error === 'no_git_repository' && config.onNoRepository === 'skip') {
+      const fingerprint = fingerprintOf(['no_repository', location.directory, ticketDir, ticket.execution?.base ?? ''])
+      const receipt: Receipt = { fingerprint, base: '', head: '', at: new Date().toISOString(), outcome: 'skipped',
+        reason: 'no_repository_skipped', blocking: 0, counts: { critical: 0, high: 0, medium: 0, low: 0 }, deterministic: [], findings: [],
+        ...(location.directory ? { repository: location.directory } : {}) }
+      writeReceipt(dir, receipt)
+      return { mode: config.mode, pass: true, blocking: 0, receipt, exhausted: false, unavailable: false,
+        blocksHandover: false, summary: '质量门禁：跳过（工作区及子目录无 git 仓库）' }
+    }
     const head = location.error ? '' : await this.run('git', ['-C', location.directory, 'rev-parse', 'HEAD'], location.directory).then(clean).catch(() => '')
     const dirty = location.error ? '' : await this.run('git', ['-C', location.directory, 'status', '--porcelain'], location.directory).catch(() => '')
+    // Code-change guard: a ticket whose diff touches no code file skips the review entirely (no ocr call, no token cost).
+    // This is a clean pass, not an unavailable reviewer, so it is never fail-closed. A repository we cannot locate is left to
+    // the normal path so a genuine setup fault still surfaces as `no_git_repository`.
+    if (!location.error) {
+      const files = await this.changedFiles(location.directory, location.base)
+      // Only skip on a known, non-empty change set that has no code file: an empty or unavailable diff falls through so a real
+      // setup fault and a genuinely empty change both keep their existing outcomes.
+      if (files.length > 0 && !hasCodeChanges(files)) {
+        const fingerprint = fingerprintOf(['no_code_change', location.directory, location.base, head, clean(dirty), files.sort().join(',')])
+        const receipt: Receipt = { fingerprint, base: location.base, head, at: new Date().toISOString(), outcome: 'skipped',
+          reason: 'no_code_change', blocking: 0, counts: { critical: 0, high: 0, medium: 0, low: 0 }, deterministic: [], findings: [],
+          ...(location.directory ? { repository: location.directory } : {}) }
+        writeReceipt(dir, receipt)
+        return { mode: config.mode, pass: true, blocking: 0, receipt, exhausted: false, unavailable: false,
+          blocksHandover: false, summary: '质量门禁：跳过（未涉及代码变更）' }
+      }
+    }
     const fingerprint = fingerprintOf([location.error ?? '', location.directory, location.base, head, clean(dirty),
       config.provider, config.effort, String(config.maxTokensBudget)])
 
