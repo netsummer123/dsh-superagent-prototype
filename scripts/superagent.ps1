@@ -95,13 +95,29 @@ function Get-RecordedPid {
   return $null
 }
 
-# All Node processes whose command line runs this profile. The profile name is matched as a whole token after `--profile`
-# (anchored by a following whitespace, quote, or end of line) and regex-escaped, so `--profile superagent` never matches
-# `--profile superagent-dev` or `--profile superagent2`, and a `*`/`?`/`[` in the name is treated literally.
+# Whether a process command line is the DSH service for this profile, mirroring `serves()` in the POSIX peer `scripts/dsh-superagent`:
+# accept both `--profile <name>` and `--profile=<name>`, and reject an invocation that carries a `plugin` subcommand (the admin
+# `dsh plugin --profile <name> add ...` command must never be treated as, or killed as, the service).
+function Test-ServesProfile([string]$CommandLine) {
+  $tokens = $CommandLine -split '\s+'
+  $matched = $false
+  $value = $false
+  $subcommands = @()
+  # Skip the first token (the program path); inspect the rest like the peer's `args[1:]`.
+  for ($i = 1; $i -lt $tokens.Count; $i++) {
+    $word = $tokens[$i]
+    if ($value) { if ($word -eq $Profile) { $matched = $true }; $value = $false }
+    elseif ($word -eq '--profile') { $value = $true }
+    elseif ($word -eq "--profile=$Profile") { $matched = $true }
+    elseif (-not $word.StartsWith('-')) { $subcommands += $word }
+  }
+  return ($matched -and -not ($subcommands -contains 'plugin'))
+}
+
+# All Node processes whose command line runs this profile.
 function Get-SuperagentProcesses {
-  $pattern = "--profile\s+$([regex]::Escape($Profile))(\s|$|`"|')"
   Get-CimInstance Win32_Process -Filter "name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -match $pattern } |
+    Where-Object { $_.CommandLine -and (Test-ServesProfile $_.CommandLine) } |
     ForEach-Object { [pscustomobject]@{ Id = [int]$_.ProcessId; CommandLine = $_.CommandLine } }
 }
 
@@ -124,6 +140,13 @@ function Start-Service2 {
   $procs = @(Get-SuperagentProcesses)
   if ($procs.Count -gt 0) {
     Write-Host "Already running (pid $($procs[0].Id)); use restart to restart." -ForegroundColor Yellow
+    return (Status-Service2)
+  }
+
+  # No matching command line was found, but an instance may still be serving this URL (started another way). Probe the
+  # management API before touching the lock or launching a second process against the same state directory and port.
+  if ($null -ne (Invoke-State)) {
+    Write-Host "An instance already answers at $BaseUrl but was not launched by this script; refusing to start a second." -ForegroundColor Red
     return (Status-Service2)
   }
 
