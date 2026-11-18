@@ -20,8 +20,6 @@ const MAX_SEND_FAILURES = 5
 const DEFAULT_APP_NAME = 'super-agent'
 /** Truncation limit (characters) for a report summary inside the DingTalk text body. */
 const SUMMARY_MAX = 300
-/** The ended-announcement map is bounded so it cannot grow without limit across a long deployment. */
-const ENDED_KEEP = 500
 
 type PersonAction = 'review' | 'answer' | 'delivery' | 'blocked' | 'failed'
 /** What a person must do, in the words the DingTalk message uses. */
@@ -175,21 +173,26 @@ export class PersonNotify {
   private async scanResults(robotCode: string, recipients: string[], signal: AbortSignal): Promise<boolean> {
     const announced = this.host.store.get(KV.personNotify.ended) ?? {}
     const next: Record<string, string> = { ...announced }
-    // A ticket ending at or before the stored watermark was already announced (or predates this feature), so trimming the
-    // map by count can never resurrect an old result as a duplicate push. A resume that ends a ticket again yields a newer
-    // `ended.at` and so crosses the watermark, announcing exactly once. Filter against the watermark read at pass start (not
-    // one advanced mid-pass): the store lists newest-first, so advancing it per-send would wrongly skip every older ticket.
-    const storedWatermark = this.host.store.get(KV.personNotify.endedWatermark) ?? ''
-    let newWatermark = storedWatermark
-    let watermarkMoved = false
+    const tickets = this.host.store.tickets.list()
+    // Dedup is keyed `id:endedAt`, so a ticket that a resume ends again (a new `ended.at`) is announced exactly once. A failed
+    // send is never recorded, so it retries next pass; and an announced entry is only dropped once its ticket leaves the store, so
+    // nothing is ever re-sent just because the map was trimmed. There is therefore no count cap to resurrect old ids (the storm).
+    // On the first run after this feature ships, the store already holds every historical ended ticket; seed them as announced
+    // WITHOUT sending so the operator is not flooded with the whole backlog in one tick. The marker records that seeding happened.
+    if (!this.host.store.get(KV.personNotify.endedWatermark)) {
+      const seeded: Record<string, string> = { ...next }
+      const at = new Date().toISOString()
+      for (const ticket of tickets) if (ticket.ended) seeded[`${ticket.id}|${ticket.ended.at ?? ''}`] = at
+      this.host.store.set(KV.personNotify.ended, seeded)
+      this.host.store.set(KV.personNotify.endedWatermark, 'seeded')
+      return false
+    }
     let failedThisPass = false
-    for (const ticket of this.host.store.tickets.list()) {
+    for (const ticket of tickets) {
       if (signal.aborted) break
       if (!ticket.ended) continue
-      const endedAt = ticket.ended.at ?? ''
-      const key = `${ticket.id}:${endedAt}`
+      const key = `${ticket.id}|${ticket.ended.at ?? ''}`
       if (announced[key]) continue
-      if (endedAt && endedAt <= storedWatermark) continue
       try {
         await this.send(robotCode, recipients, this.compose(ticket, { kind: 'result' }))
       } catch (error) {
@@ -200,15 +203,18 @@ export class PersonNotify {
         continue
       }
       next[key] = new Date().toISOString()
-      if (endedAt > newWatermark) { newWatermark = endedAt; watermarkMoved = true }
     }
-    // Bound the map by count: safe now, because the watermark stops any trimmed (older) id from being re-announced.
-    const entries = Object.entries(next).sort((a, b) => a[1].localeCompare(b[1])).slice(-ENDED_KEEP)
-    const nextMap = Object.fromEntries(entries)
-    const changed = Object.keys(nextMap).length !== Object.keys(announced).length
-      || Object.keys(nextMap).some(key => nextMap[key] !== announced[key])
-    if (changed) this.host.store.set(KV.personNotify.ended, nextMap)
-    if (watermarkMoved) this.host.store.set(KV.personNotify.endedWatermark, newWatermark)
+    // Liveness prune: drop entries whose ticket is gone from the store, so the map stays bounded by the store's own ticket set
+    // without a count cap that could later re-expose a still-present id.
+    const live = new Set(tickets.map(ticket => ticket.id))
+    const pruned: Record<string, string> = {}
+    for (const [key, when] of Object.entries(next)) {
+      const id = key.slice(0, key.indexOf('|'))
+      if (live.has(id)) pruned[key] = when
+    }
+    const changed = Object.keys(pruned).length !== Object.keys(announced).length
+      || Object.keys(pruned).some(key => pruned[key] !== announced[key])
+    if (changed) this.host.store.set(KV.personNotify.ended, pruned)
     return failedThisPass
   }
 

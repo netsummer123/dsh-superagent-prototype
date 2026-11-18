@@ -35,9 +35,8 @@ export const KV = {
   personNotify: { notified: record<Record<string, string>>('person-notified'),
     /** Ended tickets already announced by the PersonNotify loop: `ticketId:endedAt` -> when its result was pushed. */
     ended: record<Record<string, string>>('person-ended'),
-    /** High-water `ended.at` of the newest result already pushed; a ticket ending at or before it is never re-announced,
-     * so trimming the `ended` map by count cannot resurrect old results as a notification storm. */
-    endedWatermark: record<string>('person-ended-watermark') },
+    /** Marker that the initial seed of pre-existing ended results ran (so the first pass does not push the whole backlog). */
+    endedWatermark: record<string>('person-ended-seeded') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */
