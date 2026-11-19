@@ -30,8 +30,8 @@ param(
   # DSH profile to manage (default superagent).
   [string]$Profile = 'superagent',
 
-  # DSH home (default %USERPROFILE%\.dsh).
-  [string]$DshHome = (Join-Path $env:USERPROFILE '.dsh'),
+  # DSH home (default: $env:DSH_HOME when set, else %USERPROFILE%\.dsh — matching the documented DSH_HOME relocation).
+  [string]$DshHome = $(if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }),
 
   # Node executable (default: node on PATH, else the nvm4w install).
   [string]$Node = '',
@@ -199,10 +199,18 @@ function Start-Service2 {
   $errLog = Join-Path $LogDir "superagent-$stamp.err.log"
 
   Write-Host "Starting superagent profile '$Profile' on $BaseUrl ..."
-  $p = Start-Process -FilePath $Node -WindowStyle Hidden -PassThru `
-    -ArgumentList @("`"$DshBin`"", '--profile', $Profile) `
-    -WorkingDirectory $RepoRoot `
-    -RedirectStandardOutput $log -RedirectStandardError $errLog
+  # Make the launched node process use the same DSH home this script derived ($StateDir/$ProfileDir come from it), whether the
+  # home came from $env:DSH_HOME or an explicit -DshHome. Restore the caller's value afterwards.
+  $prevDshHome = $env:DSH_HOME
+  $env:DSH_HOME = $DshHome
+  try {
+    $p = Start-Process -FilePath $Node -WindowStyle Hidden -PassThru `
+      -ArgumentList @("`"$DshBin`"", '--profile', $Profile) `
+      -WorkingDirectory $RepoRoot `
+      -RedirectStandardOutput $log -RedirectStandardError $errLog
+  } finally {
+    if ($null -eq $prevDshHome) { Remove-Item Env:\DSH_HOME -ErrorAction SilentlyContinue } else { $env:DSH_HOME = $prevDshHome }
+  }
 
   Set-Content -Path $PidFile -Value $p.Id -Encoding ascii
   Write-Host "Launched pid $($p.Id). Log: $log"
@@ -226,8 +234,22 @@ function Stop-Service2 {
   $procs = @(Get-SuperagentProcesses)
   if ($procs.Count -eq 0) { Write-Host 'Not running.' -ForegroundColor Yellow; Remove-Item $PidFile -ErrorAction SilentlyContinue; return 0 }
   $failed = $false
+  # Ask each process to close gracefully first (CloseMainWindow posts WM_CLOSE where a console/window exists, letting the
+  # runtime flush sessions and cancel Executor Sessions as the POSIX peer's SIGINT does). A headless detached node has no
+  # window, so CloseMainWindow returns false and there is nothing to close; we then wait the graceful window and, only as a
+  # last resort, force-terminate — the one shutdown Windows offers for a process with no console. Either way we verify the
+  # result below and never report success while the service survives.
   foreach ($proc in $procs) {
     Write-Host "Stopping pid $($proc.Id) ..."
+    try {
+      $p = Get-Process -Id $proc.Id -ErrorAction Stop
+      [void]$p.CloseMainWindow()
+    } catch { Write-Host "  could not signal $($proc.Id): $_" -ForegroundColor Yellow }
+  }
+  $gracefulDeadline = (Get-Date).AddSeconds(10)
+  while ((Get-Date) -lt $gracefulDeadline -and @(Get-SuperagentProcesses).Count -gt 0) { Start-Sleep -Milliseconds 250 }
+  foreach ($proc in @(Get-SuperagentProcesses)) {
+    Write-Host "  pid $($proc.Id) did not stop gracefully; terminating." -ForegroundColor Yellow
     try { Stop-Process -Id $proc.Id -Force -ErrorAction Stop } catch { Write-Host "  could not stop $($proc.Id): $_" -ForegroundColor Red; $failed = $true }
   }
   # Wait for the port to free.

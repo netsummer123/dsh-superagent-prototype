@@ -105,36 +105,38 @@ export interface GateContext {
 }
 
 /** A receipt that records why the reviewer never ran. All of these are fail-closed candidates, unlike `no_reviewable_files`. */
-export const UNAVAILABLE_REASONS = ['ocr_unavailable', 'no_git_repository', 'base_unresolved'] as const
-
-/** File extensions treated as code, so a diff that only touches docs/config/assets skips the gate instead of spending a review. */
-export const CODE_EXTENSIONS: ReadonlySet<string> = new Set([
-  'ts', 'tsx', 'mts', 'cts', 'js', 'jsx', 'mjs', 'cjs', 'vue', 'svelte',
-  'py', 'rb', 'go', 'rs', 'java', 'kt', 'kts', 'scala', 'groovy', 'clj', 'cljs',
-  'c', 'h', 'cc', 'cpp', 'cxx', 'hpp', 'hh', 'm', 'mm', 'cs', 'fs', 'vb',
-  'php', 'swift', 'dart', 'lua', 'pl', 'pm', 'r', 'jl', 'ex', 'exs', 'erl', 'hrl',
-  'hs', 'ml', 'mli', 'zig', 'nim', 'sol', 'asm', 's', 'sh', 'bash', 'zsh', 'ps1', 'psm1',
-  'sql', 'graphql', 'gql', 'proto', 'thrift', 'css', 'scss', 'sass', 'less', 'styl',
-  'html', 'htm', 'xml', 'xsl', 'xslt', 'jinja', 'j2', 'ejs', 'hbs', 'mustache', 'tf', 'tfvars',
-  // Manifests, lockfiles and CI/config that carry gate-relevant risk (a dependency bump or CI rewrite is a classic bypass):
-  'json', 'json5', 'jsonc', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf', 'env', 'lock',
-  'mod', 'sum', 'gradle', 'cmake', 'mk', 'bzl', 'nix', 'csproj', 'sln', 'fsproj', 'vbproj', 'props', 'targets',
-])
-
-/** File names (basename, extensionless or dotted variants) that always count as code regardless of extension. */
-const CODE_BASENAMES = /^(Makefile|makefile|GNUmakefile|Dockerfile|Containerfile|Rakefile|Gemfile|Procfile|Jenkinsfile|Vagrantfile|Brewfile|CMakeLists\.txt|\.gitlab-ci\.yml|\.env|\.dockerignore|\.gitignore|\.npmrc|\.nvmrc)$/i
+export const UNAVAILABLE_REASONS = ['ocr_unavailable', 'no_git_repository', 'repository_unusable', 'base_unresolved'] as const
 
 /**
- * Whether a changed path is a code file. Extension test, plus known build/CI basenames and `Dockerfile.<tag>` /
- * `docker-compose.<x>.yml` style names, so a docs-only change does not drag them in but a manifest/CI change still reviews.
+ * Extensions that are confidently NON-code: prose docs and binary/asset formats. The code-change guard skips the review only
+ * when every changed path is one of these, so an unknown extension, an extensionless script (`bin/deploy`), a dotted name
+ * like `.env.local` (whose last suffix is `local`), or any manifest/CI/config still counts as code and is reviewed. A denylist
+ * (default = code) avoids the false negatives an extension allowlist would let bypass the gate.
+ */
+export const NON_CODE_EXTENSIONS: ReadonlySet<string> = new Set([
+  'md', 'mdx', 'markdown', 'mdown', 'rst', 'adoc', 'asciidoc', 'txt', 'text', 'rtf', 'org', 'tex',
+  'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'ico', 'icns', 'tif', 'tiff', 'psd', 'ai', 'eps', 'avif', 'heic',
+  'svg', 'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'odp', 'epub',
+  'mp3', 'wav', 'ogg', 'flac', 'aac', 'm4a', 'mp4', 'webm', 'mov', 'avi', 'mkv', 'wmv',
+  'ttf', 'otf', 'woff', 'woff2', 'eot', 'zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar',
+])
+
+/** Exact basenames that are confidently non-code (prose/law/licence metadata). */
+const NON_CODE_BASENAMES = /^(LICEN[CS]E|COPYING|NOTICE|AUTHORS|CONTRIBUTORS?|CHANGELOG|CHANGES|HISTORY|README|NEWS|TODO)(\.[\w-]+)?$/i
+
+/**
+ * Whether a changed path is a code file. Denylist: a path is "code" unless it is positively a known non-code doc/asset, so a
+ * diff that only touches docs or images skips the review while anything unknown (extensionless scripts, odd suffixes,
+ * manifests, CI) is still reviewed.
  */
 export function isCodePath(path: string): boolean {
   const name = path.split(/[\\/]/).pop() ?? path
+  if (NON_CODE_BASENAMES.test(name)) return false
   const dot = name.lastIndexOf('.')
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
-  if (ext && CODE_EXTENSIONS.has(ext)) return true
-  if (CODE_BASENAMES.test(name)) return true
-  return /^(Dockerfile|Containerfile|docker-compose|compose)(\.[\w.-]+)?$/i.test(name)
+  // No extension (extensionless script/executable) is code; a known non-code extension is not; anything else is code.
+  if (!ext) return true
+  return !NON_CODE_EXTENSIONS.has(ext)
 }
 
 /** Whether any changed path is a code file; an empty list is not a code change. */
@@ -219,6 +221,7 @@ export function buildUnavailableInput(receipt: Receipt): string {
   const cause: Record<string, string> = {
     ocr_unavailable: 'ocr 未安装、端点不可达、限流或请求超时',
     no_git_repository: '在工单目录下找不到可用的 git 仓库（改动可能位于子目录）',
+    repository_unusable: '找到了 git 仓库目录，但无法读取其 HEAD（索引为空/损坏或 git 故障）',
     base_unresolved: '无法确定审查起点 commit（无法推导 merge-base）',
   }
   return [
@@ -408,7 +411,10 @@ export class QualityGate {
       if (directory === ticketDir) return { directory, base: '', error: 'no_git_repository' }
     }
     const head = await this.run('git', ['-C', directory, 'rev-parse', 'HEAD'], directory).then(clean).catch(() => '')
-    if (!head) return { directory, base: '', error: 'no_git_repository' }
+    // A repository directory was found but its HEAD is unreadable (empty/corrupt index, git failure): that is a setup fault,
+    // NOT "no repository". Keep it distinct so `onNoRepository=skip` (which only covers a genuine absence) cannot turn it into
+    // a clean unreviewed pass; it stays fail-closed as an unavailable reviewer.
+    if (!head) return { directory, base: '', error: 'repository_unusable' }
     const base = recordedBase || await this.inferBase(directory)
     return { directory, base }
   }
