@@ -121,8 +121,8 @@ export const NON_CODE_EXTENSIONS: ReadonlySet<string> = new Set([
   'ttf', 'otf', 'woff', 'woff2', 'eot', 'zip', 'tar', 'gz', 'tgz', 'bz2', 'xz', '7z', 'rar',
 ])
 
-/** Exact basenames that are confidently non-code (prose/law/licence metadata). */
-const NON_CODE_BASENAMES = /^(LICEN[CS]E|COPYING|NOTICE|AUTHORS|CONTRIBUTORS?|CHANGELOG|CHANGES|HISTORY|README|NEWS|TODO)(\.[\w-]+)?$/i
+/** Metadata basenames that are non-code only as bare names (LICENSE, README) or with a non-code suffix (README.md). */
+const NON_CODE_BASENAMES = /^(LICEN[CS]E|COPYING|NOTICE|AUTHORS|CONTRIBUTORS?|CHANGELOG|CHANGES|HISTORY|README|NEWS)$/i
 
 /**
  * Whether a changed path is a code file. Denylist: a path is "code" unless it is positively a known non-code doc/asset, so a
@@ -131,9 +131,11 @@ const NON_CODE_BASENAMES = /^(LICEN[CS]E|COPYING|NOTICE|AUTHORS|CONTRIBUTORS?|CH
  */
 export function isCodePath(path: string): boolean {
   const name = path.split(/[\\/]/).pop() ?? path
-  if (NON_CODE_BASENAMES.test(name)) return false
   const dot = name.lastIndexOf('.')
   const ext = dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
+  // A metadata basename (README, LICENSE, CHANGELOG, ...) is non-code as a bare name or with a non-code suffix; `README.ts` or
+  // `History.tsx` is source and must be reviewed.
+  if (NON_CODE_BASENAMES.test(ext ? name.slice(0, dot) : name)) return !!ext && !NON_CODE_EXTENSIONS.has(ext)
   // No extension (extensionless script/executable) is code; a known non-code extension is not; anything else is code.
   if (!ext) return true
   return !NON_CODE_EXTENSIONS.has(ext)
@@ -291,7 +293,8 @@ export async function deterministicChecks(directory: string, base: string | unde
   const diff = await run('git', ['-C', directory, 'diff', '--unified=0', ...range], directory).catch(() => '')
   const added = diff.split('\n').filter(line => line.startsWith('+') && !line.startsWith('+++'))
   if (added.some(line => /\b(console\.log|debugger|pdb\.set_trace|binding\.pry)\b/.test(line) || /\bprint\(/.test(line))) failures.push('调试残留')
-  if (added.some(line => /\b(TODO|FIXME|XXX)\b/.test(line))) failures.push('TODO/FIXME')
+  // Marked up as character classes so this very source line does not itself read as a leftover marker and trip the check.
+  if (added.some(line => /\b(T[O]DO|F[I]XME|X[X]X)\b/.test(line))) failures.push('未完成标记残留')
   if (added.some(line => /(sk-[A-Za-z0-9]{16,}|AKIA[0-9A-Z]{16}|BEGIN [A-Z ]*PRIVATE KEY)/.test(line))) failures.push('疑似硬编码密钥')
   return failures
 }

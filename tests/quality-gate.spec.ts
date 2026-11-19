@@ -449,6 +449,17 @@ describe('code-change guard', () => {
     expect(isCodePath('assets/logo.png')).toBe(false)
     expect(hasCodeChanges(['README.md', 'docs/a.md'])).toBe(false)
     expect(hasCodeChanges(['README.md', 'src/a.py'])).toBe(true)
+    // A source file whose basename is a metadata word must still be code: only a non-code suffix (or none) is non-code.
+    expect(isCodePath('README.ts')).toBe(true)
+    expect(isCodePath('Todo.tsx')).toBe(true)
+    expect(isCodePath('src/History.ts')).toBe(true)
+    expect(isCodePath('README.md')).toBe(false)
+    expect(isCodePath('LICENSE')).toBe(false)
+    // Manifest / CI / extensionless script / dotted env file are code (reviewed), never a docs-only skip.
+    expect(isCodePath('package.json')).toBe(true)
+    expect(isCodePath('.github/workflows/ci.yml')).toBe(true)
+    expect(isCodePath('bin/deploy')).toBe(true)
+    expect(isCodePath('.env.local')).toBe(true)
   })
 
   it('skips review (clean pass) when the diff touches only non-code files, without calling ocr', async () => {
