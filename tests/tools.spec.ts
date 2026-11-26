@@ -1,9 +1,12 @@
 /** Session tool registration, role-scoped resource reads, and routing/settings tool contracts. */
+import { mkdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { TICKET_STATES } from '../src/app/cards.ts'
 import { builtInBase, builtInParts, defaultPrompts } from '../src/app/prompts.ts'
 import { UserError } from '../src/core/index.ts'
 import { KV } from '../src/kv.ts'
+import { LIMITS } from '../src/limits.ts'
 import { RESOURCES } from '../src/app/resources.ts'
 import { CliError, Commands } from '../src/infra/commands.ts'
 import { IM_WORDS, NOTE_WORDS } from '../src/infra/text.ts'
@@ -187,6 +190,26 @@ it('refuses alone an item that lacks a field its kind needs or breaks a field\'s
   expect(h.runtime.store.tickets.list()).toEqual([])
 })
 
+it('routes an explicit accept to a configured local project and refuses a name the registry does not hold', async () => {
+  const path = join(h.directory, 'demo-web')
+  mkdirSync(path)
+  h.runtime.store.saveSettings({ ...h.runtime.store.settings(), projects: { items: [{ name: 'Demo Web', path, keywords: [] }], matchFallback: 'directory' } })
+  const request = feishu('8', '@bot 改一下首页')
+  h.runtime.receive(request); await h.runtime.idle()
+  const result = await h.route({ kind: 'accept', trigger_id: request.id, title: '首页改版', worktree_name: 'demo-page',
+    acknowledgement: '收到。', project: ' Demo Web ' })
+  const ticket = h.runtime.store.tickets.get((result.ticket as { ticket_id: string }).ticket_id)!
+  // The accept carries the project into the ticket's workspace and execution environment; the name is trimmed and exact.
+  expect(ticket.execution).toMatchObject({ project: 'Demo Web', directory: path })
+  expect(h.runtime.ticketEnvironment(ticket).find(variable => variable.key === 'DSH_SUPERAGENT_PROJECT')?.value).toBe('Demo Web')
+  // An unknown project must not silently fall back to the default ticket directory: the item is refused before a ticket exists.
+  const unknown = feishu('9', '@bot 也改一下首页')
+  h.runtime.receive(unknown); await h.runtime.idle()
+  await expect(h.route({ kind: 'accept', trigger_id: unknown.id, title: '另一页', worktree_name: 'other-page',
+    acknowledgement: '收到。', project: 'Demo Site' })).rejects.toThrow('Unknown project: Demo Site')
+  expect(h.runtime.store.tickets.list()).toHaveLength(1)
+})
+
 it('decides a candidate\'s batch with its card\'s trigger: a second accept keeps the first, and no other decision contradicts it', async () => {
   await h.runtime.settings.pause(true, 'panel')
   const first = feishu('1', '@bot 首页的标题'), second = feishu('2', '@bot 改成“浏览网页”', { root_id: 'om_1' })
@@ -212,7 +235,8 @@ it('states each routing field\'s limit in its description, which the schema leav
   type Schema = { parameters: { properties: { decisions: { items: { properties: Record<string, { description?: string }> } } } } }
   const fields = (h.tools.get(h.runtime.masterId)!.get('orchestrator_route') as unknown as Schema).parameters.properties.decisions.items.properties
   const limits: Record<string, string[]> = { title: ['200 characters'], worktree_name: ['kebab-case', '32 characters'],
-    acknowledgement: [`${IM_WORDS} words`], note: [`${NOTE_WORDS} words`, 'Never add implementation instructions'], reason: ['500 characters'] }
+    project: ['exact name', `${LIMITS.projectName} characters`], acknowledgement: [`${IM_WORDS} words`],
+    note: [`${NOTE_WORDS} words`, 'Never add implementation instructions'], reason: ['500 characters'] }
   for (const [field, phrases] of Object.entries(limits)) for (const phrase of phrases) expect(fields[field]!.description, field).toContain(phrase)
 })
 

@@ -98,13 +98,14 @@ export function policySection(settings: Settings, config: PromptConfig = default
   return { key: part, text: fill(builtIn(config, part), { version: policyVersion(settings), mode: settings.eval.mode, rules: rules.join('\n') }) }
 }
 const PROJECTS_HEADING = '## Local projects\n'
-  + 'These local projects are configured on this installation. When you accept a task, set the assessment `project` field to the exact '
-  + 'name of the project whose directory the work belongs in. Decide by an explicit project name or keyword in the task first, then by a '
-  + 'project directory the task names, then by which project the task evidently concerns. A project may list no keywords: match such a '
-  + 'project by its name and directory alone, and never treat missing keywords as a reason to skip it. Put the name in `project` itself; '
-  + 'naming the project only in `note`, in the scope or in the acknowledgement does not route the work, and the ticket falls back to the '
-  + 'default ticket directory. Omit `project` only when no project clearly matches, and never invent a name: an unknown name is ignored. '
-  + 'The `project` field only chooses the workspace directory: it does not change whether or how the request is accepted.'
+  + 'These local projects are configured on this installation. Whether you accept a task through an assessment or through orchestrator_route, '
+  + 'set the accept\'s `project` field to the exact name of the project whose directory the work belongs in. Decide by an explicit project '
+  + 'name or keyword in the task first, then by a project directory the task names, then by which project the task evidently concerns. A '
+  + 'project may list no keywords: match such a project by its name and directory alone, and never treat missing keywords as a reason to skip '
+  + 'it. Put the name in `project` itself; naming the project only in `note`, in the scope or in the acknowledgement does not route the work, '
+  + 'and the ticket falls back to the default ticket directory. Omit `project` only when no project clearly matches, and never invent a name: '
+  + 'an unconfigured name is refused on a route accept. The `project` field only chooses the workspace directory: it does not change whether '
+  + 'or how the request is accepted.'
 /**
  * The main Session's project-routing section: each configured project on one line as its name, its directory and, when it has any,
  * its keywords, or nothing while no project is configured. Every field is flattened onto one line so a line reads as one project,
