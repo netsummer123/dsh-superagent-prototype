@@ -148,9 +148,10 @@ describe('projectsSection', () => {
     expect(text.split('\n').filter(line => line.startsWith('- '))).toEqual(['- Demo; directory: D:\\work\\demo'])
   })
 
-  it('tells the assessor that the name must go in the project field, not in the note', () => {
+  it('tells the decision-taker that the name must go in the project field, not in the note', () => {
     const text = projectsSection(settings({}, { items: PROJECTS }))
-    expect(text).toContain('set the assessment `project` field to the exact')
+    expect(text).toContain('Whether you accept a task through an assessment or through orchestrator_route')
+    expect(text).toContain("set the accept's `project` field to the exact")
     expect(text).toContain('naming the project only in `note`')
   })
 

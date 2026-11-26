@@ -200,7 +200,7 @@ That context supplies deployment and commands, setup readiness (`ready`, `config
 
 `prepare(ticket, outcome)` supplies the Engine's `prepareTicket` hook: short name, directory and `ticketExecution` assignment text. `workerSessionId(ticket.id)` derives the Session id.
 
-`ticketExecution` decides the workspace: a Ticket whose assessment named a local project in the registry is planned at that project's directory and records `execution.project` as the project's name; any other Ticket gets `<directory root>/<name>-<id>`, as before. A name the registry does not hold — unknown, misspelled or removed — falls back silently, so a model's mistake never sends work into the wrong directory.
+`ticketExecution` decides the workspace: a Ticket whose accept named a local project in the registry — an assessment's accept or an `orchestrator_route` accept — is planned at that project's directory and records `execution.project` as the project's name; any other Ticket gets `<directory root>/<name>-<id>`, as before. An assessment's name the registry does not hold — unknown, misspelled or removed — falls back silently, while an explicit route item naming an unconfigured project is refused before a Ticket is created; either way a model's mistake never sends work into the wrong directory.
 
 Preparation then decides how a project Ticket develops, because only the filesystem can tell. `findRepo` looks for a repository: the project directory itself, or the single immediate subdirectory that is one. With a repository the Ticket gets its own `git worktree` of it under the execution root, on the branch `agent/<ticket name>`, and `execution.repo` records the repository — so its workspace, its lock and its cleanup follow the Ticket rather than a registry entry that may be renamed or deleted. Without one — no repository, or several competing ones, as a project holding `web/`, `api/` and materials does — it develops in place in the project directory, where the whole directory is visible, and its project lock keeps its Tickets one at a time. Either way the project directory itself is never created or removed: the work-tree path only ever adds a work tree, and the in-place path only ever verifies.
 
@@ -332,7 +332,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/app/cache.ts` | `TextCache`: texts kept in memory within a size, the least recently used dropped first |
 | `src/app/settings.ts` | Settings |
 | `src/app/settings-history.ts` | `policyHistory`: each saved settings revision with what it changed from the one before |
-| `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, `promptParts`, the order of a role's prompt sections, and `projectsSection`, the local projects an assessment routes a Ticket by |
+| `src/app/prompts.ts` | Prompts, `builtInParts`, the built-in parts a team may override, `promptParts`, the order of a role's prompt sections, and `projectsSection`, the local projects an accept routes a Ticket by |
 | `src/app/context.ts` | The built-in prompt text, read from `prompts/`, and the transcript entries Sessions read |
 | `src/app/skill-files.ts` | Packaged text: `promptFile`, which joins a file's one-sentence lines into paragraphs, and the bundled skills |
 | `src/app/sessions.ts` | Sessions |
